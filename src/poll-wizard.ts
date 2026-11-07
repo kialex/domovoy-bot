@@ -16,7 +16,7 @@ export const ADMIN_ACTIONS = {
   menu: '🏠 Головне меню',
   cancel: '✕ Скасувати заповнення',
 };
-export async function adminMenu(env: Env) {
+export async function adminMenu(env: Env, message?:string) {
   await telegram(env, 'setMyCommands', {
     scope: { type: 'chat', chat_id: Number(env.ADMIN_TELEGRAM_USER_ID) },
     commands: [
@@ -26,7 +26,7 @@ export async function adminMenu(env: Env) {
   await telegram(env, 'setChatMenuButton', { chat_id: Number(env.ADMIN_TELEGRAM_USER_ID), menu_button: { type: 'commands' } });
   return telegram<{ message_id: number }>(env, 'sendMessage', {
     chat_id: env.ADMIN_TELEGRAM_USER_ID,
-    text: 'HomeBot 🏡\nОберіть дію на клавіатурі внизу чату.\n\nЯкщо клавіатура прихована, відкрийте її значком біля поля вводу. Або натисніть «Меню» біля поля вводу → «Відкрити головне меню».',
+    text: message || 'HomeBot 🏡\nОберіть дію на клавіатурі внизу чату.\n\nЯкщо клавіатура прихована, відкрийте її значком біля поля вводу. Або натисніть «Меню» біля поля вводу → «Відкрити головне меню».',
     reply_markup: {
       keyboard: [
         [{ text: ADMIN_ACTIONS.poll }, { text: ADMIN_ACTIONS.polls }],

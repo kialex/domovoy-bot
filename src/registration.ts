@@ -99,7 +99,7 @@ export async function resumeRegistration(env:Env,uid:number,chatId:number) {
   if(pending)return plainCard(env,uid,'Заявку надіслано. Очікуйте підтвердження.');
   return startRegistration(env,uid,`group_${Math.abs(chatId)}`);
 }
-export async function startRegistration(env: Env, uid: number, payload?: string) {
+export async function startRegistration(env: Env, uid: number, payload?: string, addAnother=false) {
   let chatId: number | null = null; let pollId: number | undefined;
   if (payload?.startsWith('poll_')) {
     pollId = positiveId(payload.slice(5)) || undefined;
@@ -114,6 +114,16 @@ export async function startRegistration(env: Env, uid: number, payload?: string)
     else return plainCard(env, uid, '🏡 Оберіть будинок\nДля нового будинку відкрийте реєстрацію з голосування у його групі. Для вже доданого приміщення використайте «Мої приміщення».');
   }
   if (!chatId || !isConnected(await getGroup(env, chatId))) return plainCard(env, uid, 'Будинок недоступний\nГрупу ще не підключено або від’єднано.');
+  if(!addAnother){
+    const registered=await env.HOME_DB.prepare("SELECT m.id FROM memberships m JOIN premises p ON p.id=m.premise_id WHERE m.user_id=? AND p.chat_id=? AND m.status='approved' LIMIT 1").bind(uid,chatId).first();
+    if(registered){
+      const message='✅ Ви вже зареєстровані!\n\nЩоб додати ще одну квартиру або комерцію, натисніть «➕ Додати приміщення» на клавіатурі внизу.';
+      if(String(uid)===env.ADMIN_TELEGRAM_USER_ID){const {adminMenu}=await import('./poll-wizard.ts');await adminMenu(env,message);}
+      else{const {residentMenu}=await import('./resident-menu.ts');await residentMenu(env,uid,message);}
+      if(pollId)await returnToRegistrationPoll(env,uid,chatId,{poll_id:pollId});
+      return;
+    }
+  }
   const s: Session = { user_id: uid, chat_id: chatId, token: token(), step: 'kind', data: JSON.stringify({ poll_id: pollId, ...await contactDefaults(env,uid) }) };
   await env.HOME_DB.prepare("INSERT INTO sessions(user_id,chat_id,token,step,data) VALUES (?,?,?,'kind',?) ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id,token=excluded.token,step='kind',data=excluded.data,updated_at=unixepoch()")
     .bind(uid,chatId,s.token,s.data).run();
@@ -264,6 +274,8 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
   ]);
   await answer(env,q.id,'');
   if(inGroup){
+    const group=await getGroup(env,s.chat_id);
+    await send(env,env.ADMIN_TELEGRAM_USER_ID,`✅ Зареєстровано: ${f.name}\n${premiseLabel(p)} · ${roleLabel(f.role!)}\n${group?.title||''}`);
     await plainCard(env,s.user_id,`✅ Реєстрацію завершено\n${premiseLabel(p)}`);
     if(String(s.user_id)!==env.ADMIN_TELEGRAM_USER_ID){const {residentMenu}=await import('./resident-menu.ts');await residentMenu(env,s.user_id);}
     await returnToRegistrationPoll(env,s.user_id,s.chat_id,f);

@@ -12,9 +12,9 @@ export const RESIDENT_ACTIONS = {
 };
 export const residentKeyboard=()=>({keyboard:[[{text:RESIDENT_ACTIONS.data},{text:RESIDENT_ACTIONS.units}],[{text:RESIDENT_ACTIONS.polls}],[{text:RESIDENT_ACTIONS.add},{text:RESIDENT_ACTIONS.menu}]],resize_keyboard:true,is_persistent:true,one_time_keyboard:false});
 const statusLabel: Record<string,string> = { approved: '✅ Підтверджено', pending: '⏳ На перевірці', revoked: '🚫 Доступ вимкнено', rejected: 'Відхилено' };
-export async function residentMenu(env: Env, uid: number) {
+export async function residentMenu(env: Env, uid: number, message?:string) {
   return telegram(env,'sendMessage',{
-    chat_id:uid,text:'🏡 Кабінет мешканця\nОберіть дію на клавіатурі внизу. Ви можете додати кілька квартир або комерційних приміщень.',
+    chat_id:uid,text:message||'🏡 Кабінет мешканця\nОберіть дію на клавіатурі внизу. Ви можете додати кілька квартир або комерційних приміщень.',
     reply_markup:residentKeyboard(),
   });
 }
@@ -37,16 +37,16 @@ export async function showOwnUnits(env: Env,uid:number,page=0) {
   return send(env,uid,rows.length?'🏠 Мої приміщення\nОберіть квартиру або комерцію. Доступ і голоси враховуються окремо для кожного приміщення.':'🏠 Ви ще не додали приміщення.',buttons);
 }
 export async function addUnit(env:Env,uid:number,chatId?:number) {
-  if(chatId)return startRegistration(env,uid,`group_${Math.abs(chatId)}`);
+  if(chatId)return startRegistration(env,uid,`group_${Math.abs(chatId)}`,true);
   const rows=await ownMemberships(env,uid);
   const ids=[...new Set(rows.map(m=>m.chat_id))];
-  if(ids.length===1)return startRegistration(env,uid,`group_${Math.abs(ids[0])}`);
+  if(ids.length===1)return startRegistration(env,uid,`group_${Math.abs(ids[0])}`,true);
   if(ids.length>1){
     const buttons:Button[][]=[];
     for(const id of ids){const g=await getGroup(env,id);buttons.push([{text:(g?.title||String(id)).slice(0,60),callback_data:`resident:add:${id}`}]);}
     return send(env,uid,'У якому будинку додати приміщення?\nДля нового будинку відкрийте бота з голосування в його групі.',buttons);
   }
-  return startRegistration(env,uid);
+  return startRegistration(env,uid,undefined,true);
 }
 export function pollLink(chatId:number,messageId:number):string|null {
   const id=String(chatId);

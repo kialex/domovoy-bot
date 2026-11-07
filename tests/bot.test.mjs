@@ -52,7 +52,7 @@ function harness(groups=1) {
   return h;
 }
 async function register(h,uid,{number='25',kind='apartment',floor='2',entrance='1',business='Coffee & Co',role='owner',chat=-100001,approve=true,phone='067 123 45 67'}={}) {
-  await h.msg(uid,`/register group_${Math.abs(chat)}`);
+  await h.cb(uid,`resident:add:${chat}`);
   const token=h.form(uid).token;
   await h.cb(uid,`reg:kind:${token}:${kind}`);
   if(kind==='commercial')await h.msg(uid,business);
@@ -810,7 +810,7 @@ test('existing Telegram members register as owners or tenants without admin appl
   h.apiOverride=(method,body)=>method==='getChatMember'?Response.json({ok:true,result:{status:'member'}}):undefined;
   const before=h.calls.length;const owner=await register(h,2);const tenant=await register(h,3,{number:'26',role:'tenant'});
   assert.equal(owner.status,'approved');assert.equal(tenant.status,'approved');
-  assert.equal(h.calls.slice(before).filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===1).length,0);
+  assert.ok(h.calls.slice(before).filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===1).every(c=>c.text.startsWith('✅ Зареєстровано:')&&!c.reply_markup));
   assert.equal(h.sqlite.prepare("SELECT COUNT(*) AS n FROM membership_audit WHERE action='auto_approve_group_member'").get().n,2);
   const p=await poll(h);await cast(h,2,p,0);assert.equal(currentVotes(h).length,1);
  }finally{h.close();}
@@ -935,7 +935,7 @@ test('registration from a group poll auto-approves existing participants and ret
   await h.cb(2,`reg:kind:${token}:apartment`);await h.msg(2,'25');await h.msg(2,'2');await h.msg(2,'Olena Koval');await h.msg(2,'0671234567');await h.cb(2,`reg:role:${token}:owner`);
   h.sqlite.prepare('UPDATE polls SET message_id=88888 WHERE id=?').run(p.id);
   const before=h.calls.length;await h.cb(2,`reg:submit:${token}`);
-  assert.equal(h.member(2,'25').status,'approved');assert.equal(h.calls.slice(before).filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===1).length,0);
+  assert.equal(h.member(2,'25').status,'approved');assert.ok(h.calls.slice(before).filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===1).every(c=>c.text.startsWith('✅ Зареєстровано:')&&!c.reply_markup));
   const last=h.calls.at(-1);assert.equal(last.text,'Тепер можна проголосувати.');assert.equal(last.reply_markup.inline_keyboard[0][0].url,'https://t.me/c/001/88888');
   assert.equal(currentVotes(h).length,0,'registration does not cast a vote without choosing an answer');
   const updated=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(p.id);await cast(h,2,updated,0);assert.equal(currentVotes(h).length,1);
@@ -987,4 +987,31 @@ test('description migration preserves legacy titles and active drafts without tr
   assert.equal(sqlite.prepare('SELECT question FROM polls').get().question.length,250);assert.equal(sqlite.prepare('SELECT description FROM polls').get().description,'');
   assert.equal(sqlite.prepare('SELECT step,description FROM poll_drafts').get().step,'options');assert.equal(sqlite.prepare('SELECT description FROM poll_drafts').get().description,'');
  }finally{sqlite.close();}
+});
+
+test('repeat registration links show a friendly message and bottom menu without starting a form',async()=>{
+ const h=harness();try{
+  await register(h,2);await h.msg(2,'/start group_100001');assert.equal(h.form(2),undefined);
+  const message=h.calls.at(-1);assert.match(message.text,/Ви вже зареєстровані/);assert.ok(message.reply_markup.keyboard.flat().some(b=>b.text==='➕ Додати приміщення'));assert.equal(message.reply_markup.inline_keyboard,undefined);
+  await h.msg(2,'➕ Додати приміщення');const s=h.form(2);assert.equal(s.step,'kind');assert.equal(JSON.parse(s.data).ask_name,false);assert.equal(JSON.parse(s.data).ask_phone,false);
+  await h.msg(2,'/start group_100001');assert.equal(h.form(2).token,s.token,'a repeated link preserves the active extra-premise form');
+ }finally{h.close();}
+});
+
+test('repeat registration stays house-specific and preserves administrator controls',async()=>{
+ const h=harness(2);try{
+  await register(h,2);await h.msg(2,'/start group_100002');assert.equal(h.form(2).chat_id,-100002);
+  await register(h,1);await h.msg(1,'/start group_100001');assert.equal(h.form(1),undefined);assert.match(h.calls.at(-1).text,/Ви вже зареєстровані/);assert.ok(h.calls.at(-1).reply_markup.keyboard.flat().some(b=>b.text==='📋 Мої голосування'));
+ }finally{h.close();}
+});
+
+test('automatic registration sends a short admin notice without approval buttons or duplicate notices',async()=>{
+ const h=harness();try{
+  h.apiOverride=method=>method==='getChatMember'?Response.json({ok:true,result:{status:'member'}}):undefined;
+  await register(h,2,{role:'family'});
+  const notices=()=>h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===1&&c.text.startsWith('✅ Зареєстровано:'));
+  assert.equal(notices().length,1);assert.equal(notices()[0].text,'✅ Зареєстровано: Person 2\nКвартира 25 · Член сім’ї\nHouse 1');assert.equal(notices()[0].reply_markup,undefined);
+  await h.msg(2,'/start group_100001');assert.equal(notices().length,1);
+  await register(h,2,{kind:'commercial',business:'Кав’ярня'});assert.equal(notices().length,2);assert.match(notices()[1].text,/Кав’ярня/);
+ }finally{h.close();}
 });

@@ -96,6 +96,10 @@ test('registration, approval, apartment vote uniqueness, retries and closing', a
     await callback(2, `vote:${poll.id}:0`, { ...group, message_id: 99999 });
     assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM votes').get().n, 0);
     await callback(2, `vote:${poll.id}:0`, group);
+    const live = calls.filter(c => c.method === 'editMessageText').at(-1);
+    assert.match(live.text, /Проголосувало квартир: 1/);
+    assert.equal(live.reply_markup.inline_keyboard[0][0].text, 'Так · 1');
+    assert.equal(live.reply_markup.inline_keyboard[1][0].text, 'Ні · 0');
     await callback(3, `vote:${poll.id}:1`, group);
     assert.equal(sqlite.prepare('SELECT option_index FROM votes').get().option_index, 0);
     await callback(2, `vote:${poll.id}:1`, group);
@@ -103,7 +107,7 @@ test('registration, approval, apartment vote uniqueness, retries and closing', a
     await message(1, `/close ${poll.id}`);
     await callback(2, `vote:${poll.id}:0`, group);
     assert.equal(sqlite.prepare('SELECT option_index FROM votes').get().option_index, 1);
-    const edit = calls.find(c => c.method === 'editMessageText');
+    const edit = calls.filter(c => c.method === 'editMessageText').at(-1);
     assert.deepEqual(edit.reply_markup.inline_keyboard, []);
     assert.match(edit.text, /Ні: 1/);
     assert.ok(calls.filter(c => c.method === 'sendMessage' && Number(c.chat_id) === -100123).every(c => !c.text.includes('Resident')));
@@ -264,6 +268,14 @@ test('multiple groups: connection requests, target selection, scoped registratio
     await cb(2, `vote:${p2.id}:1`, voteMessage(p2));
     assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM residents WHERE user_id=2').get().n, 2);
     assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM votes').get().n, 2, 'same apartment number votes independently in each group');
+    // Admin deep links must start registration, even while a poll draft exists.
+    await cb(1, 'admin:newpoll');
+    const adminDraft = sqlite.prepare('SELECT * FROM poll_drafts').get();
+    await register(1, p2.id);
+    assert.equal(sqlite.prepare('SELECT status FROM residents WHERE user_id=1 AND chat_id=-100222').get().status, 'approved');
+    assert.equal(sqlite.prepare('SELECT token FROM poll_drafts').get().token, adminDraft.token);
+    assert.equal(sqlite.prepare('SELECT question FROM poll_drafts').get().question, null);
+    await msg(1, '/cancel');
     // An old role button cannot submit an in-progress application for a different house.
     await msg(3, `/start poll_${p1.id}`); await msg(3, 'Third Person'); await msg(3, '8');
     const oldToken = sqlite.prepare('SELECT token FROM sessions WHERE user_id=3').get().token;

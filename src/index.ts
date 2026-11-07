@@ -14,7 +14,7 @@ async function message(env: Env, m: Message, updateId: number) {
   const command = raw.split('@')[0];
   if (command === '/id') return send(env, m.chat.id, `Ваш Telegram ID: ${m.from.id}`);
   const admin = String(m.from.id) === env.ADMIN_TELEGRAM_USER_ID;
-  if (command === '/start' && admin) return adminMenu(env);
+  if (command === '/start' && admin && !args[0]) return adminMenu(env);
   if (command === '/start' || command === '/register') return startRegistration(env, m.from.id, args[0]);
   if (command === '/cancel') {
     if (admin) await cancelPollWizard(env);
@@ -30,6 +30,8 @@ async function message(env: Env, m: Message, updateId: number) {
     return pollResults(env, id, command === '/close');
   }
   if (command === '/help') return send(env, m.chat.id, '/start — реєстрація\n/cancel — скасувати заповнення\n/id — ваш Telegram ID' + (admin ? '\n/pending — заявки (перші 20)\n/poll Питання | Так | Ні — опублікувати\n/results ID — результати\n/close ID — завершити' : ''));
+  const registration = await env.HOME_DB.prepare('SELECT user_id FROM sessions WHERE user_id=?').bind(m.from.id).first();
+  if (registration) return registrationMessage(env, m);
   if (await pollWizardMessage(env, m)) return;
   return registrationMessage(env, m);
 }

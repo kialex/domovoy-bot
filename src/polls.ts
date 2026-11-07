@@ -25,13 +25,24 @@ export async function createPoll(env: Env, input: string | { question: string; o
   if (!poll) throw new Error('Poll creation failed');
   if (poll.message_id) return true;
   if (poll.chat_id !== chatId || poll.status !== 'draft') return false;
-  const message = await send(env, poll.chat_id, `Голосування №${poll.id}\n\n${poll.question}\n\nОдин голос від квартири. Вибір можна змінити до завершення.`, [
-    ...parsed.options.map((text, index) => [{ text, callback_data: `vote:${poll.id}:${index}` }]),
-    [{ text: 'Реєстрація мешканця', url: await registrationUrl(env, poll.id) }],
-  ]);
+  const view = await livePollView(env, poll);
+  const message = await send(env, poll.chat_id, view.text, view.buttons);
   await env.HOME_DB.prepare("UPDATE polls SET message_id=?, status='open' WHERE id=? AND status='draft'").bind(message.message_id, poll.id).run();
   await send(env, env.ADMIN_TELEGRAM_USER_ID, `Голосування №${poll.id} опубліковано в групі «${group.title}».\n/results ${poll.id} — результати\n/close ${poll.id} — завершити`);
   return true;
+}
+async function livePollView(env: Env, poll: Poll) {
+  const options = JSON.parse(poll.options) as string[];
+  const { results } = await env.HOME_DB.prepare('SELECT option_index,COUNT(*) AS count FROM votes WHERE poll_id=? GROUP BY option_index').bind(poll.id).all<{ option_index: number; count: number }>();
+  const counts = new Map(results.map(r => [r.option_index, r.count]));
+  const total = results.reduce((sum, r) => sum + r.count, 0);
+  return {
+    text: `Голосування №${poll.id}\n\n${poll.question}\n\nПроголосувало квартир: ${total}\nОдин голос від квартири. Вибір можна змінити до завершення.`,
+    buttons: [
+      ...options.map((text, index) => [{ text: `${text} · ${counts.get(index) || 0}`, callback_data: `vote:${poll.id}:${index}` }]),
+      [{ text: 'Реєстрація мешканця', url: await registrationUrl(env, poll.id) }],
+    ],
+  };
 }
 export async function vote(env: Env, query: Callback) {
   const [, rawId, rawOption] = (query.data || '').split(':');
@@ -53,6 +64,10 @@ export async function vote(env: Env, query: Callback) {
       AND EXISTS (SELECT 1 FROM groups g WHERE g.chat_id=p.chat_id AND g.status='approved' AND g.bot_present=1)
     ON CONFLICT(poll_id,apartment) DO UPDATE SET option_index=excluded.option_index,updated_at=unixepoch()
     WHERE votes.user_id=excluded.user_id`).bind(option, pollId, query.from.id).run();
+  if (result.meta.changes) {
+    const view = await livePollView(env, poll);
+    await telegram(env, 'editMessageText', { chat_id: poll.chat_id, message_id: poll.message_id, text: view.text, reply_markup: { inline_keyboard: view.buttons } });
+  }
   return answer(env, query.id, result.meta.changes ? `Голос прийнято: ${options[option]}` : 'Голос уже подано іншим мешканцем вашої квартири або голосування завершено.');
 }
 export async function pollResults(env: Env, id: number, close: boolean) {

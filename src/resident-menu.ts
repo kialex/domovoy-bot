@@ -55,7 +55,7 @@ export function pollLink(chatId:number,messageId:number):string|null {
 export async function availablePolls(env:Env,uid:number,page=0) {
   const {results}=await env.HOME_DB.prepare(`SELECT DISTINCT p.id,p.question,p.chat_id,p.message_id,g.title FROM polls p JOIN groups g ON g.chat_id=p.chat_id
     JOIN premises u ON u.chat_id=p.chat_id JOIN memberships m ON m.premise_id=u.id
-    WHERE m.user_id=? AND m.status='approved' AND p.status='open' AND g.status='approved' AND g.bot_present=1 ORDER BY p.id DESC LIMIT 9 OFFSET ?`).bind(uid,page*8).all<{id:number;question:string;chat_id:number;message_id:number;title:string}>();
+    WHERE m.user_id=? AND m.status='approved' AND p.status='open' AND (p.ends_at IS NULL OR p.ends_at>unixepoch()) AND g.status='approved' AND g.bot_present=1 ORDER BY p.id DESC LIMIT 9 OFFSET ?`).bind(uid,page*8).all<{id:number;question:string;chat_id:number;message_id:number;title:string}>();
   if(!results.length)return send(env,uid,'🗳 Відкритих голосувань поки немає\nТут з’являться голосування груп, де у вас є підтверджене приміщення.');
   for(const p of results.slice(0,8)){
     const link=pollLink(p.chat_id,p.message_id);

@@ -1,3 +1,4 @@
+import { validInterval, validDuration } from './poll-settings.ts';
 import { ownMemberships, premiseLabel, roleLabel } from './premises.ts';
 import { escapeHtml } from './presentation.ts';
 import { pollCard } from './presentation.ts';
@@ -6,8 +7,9 @@ import type { Callback, Env } from './env.ts';
 import { answer, botStartUrl, registrationUrl, send, sendHtml, telegram } from './telegram.ts';
 import { parsePoll, positiveId } from './validation.ts';
 
-interface Poll { id: number; question: string; options: string; chat_id: number; message_id: number | null; status: string }
-export async function createPoll(env: Env, input: string | { question: string; options: string[] }, updateId: number, chatId?: number, groupVersion?: number) {
+interface Poll { id: number; question: string; options: string; chat_id: number; message_id: number | null; status: string; ends_at?:number|null; closed_at?:number|null }
+export async function createPoll(env: Env, input: string | { question: string; options: string[] }, updateId: number, chatId?: number, groupVersion?: number, repostInterval = 0, durationDays = 0) {
+  if (!validInterval(repostInterval) || !validDuration(durationDays)) return false;
   const parsed = typeof input === 'string' ? parsePoll(input) : input;
   if (!parsed) return send(env, env.ADMIN_TELEGRAM_USER_ID, 'Формат: /poll Питання | Варіант 1 | Варіант 2\nВід 2 до 8 різних варіантів (до 60 символів), питання — до 300 символів.');
   if (!chatId) {
@@ -22,41 +24,55 @@ export async function createPoll(env: Env, input: string | { question: string; o
   if (!isConnected(group) || (groupVersion !== undefined && group.version !== groupVersion)) {
     await send(env, env.ADMIN_TELEGRAM_USER_ID, 'Підключення цієї групи змінилося. Створіть нову чернетку й оберіть групу знову.'); return false;
   }
-  await env.HOME_DB.prepare('INSERT INTO polls(question,options,chat_id,created_by,source_update_id) VALUES (?,?,?,?,?) ON CONFLICT(source_update_id) DO NOTHING')
-    .bind(parsed.question, JSON.stringify(parsed.options), chatId, env.ADMIN_TELEGRAM_USER_ID, updateId).run();
+  await env.HOME_DB.prepare('INSERT INTO polls(question,options,chat_id,created_by,source_update_id,repost_interval,duration_days) VALUES (?,?,?,?,?,?,?) ON CONFLICT(source_update_id) DO NOTHING')
+    .bind(parsed.question, JSON.stringify(parsed.options), chatId, env.ADMIN_TELEGRAM_USER_ID, updateId, repostInterval, durationDays).run();
   const poll = await env.HOME_DB.prepare('SELECT * FROM polls WHERE source_update_id=?').bind(updateId).first<Poll>();
   if (!poll) throw new Error('Poll creation failed');
   if (poll.message_id) return true;
   if (poll.chat_id !== chatId || poll.status !== 'draft') return false;
-  const view = await livePollView(env, poll);
+  const initialEnd=durationDays?Math.floor(Date.now()/1000)+durationDays*86400:null;
+  const view = await livePollView(env, {...poll,ends_at:initialEnd});
   const message = await sendHtml(env, poll.chat_id, view.text, view.buttons);
-  await env.HOME_DB.prepare("UPDATE polls SET message_id=?, status='open' WHERE id=? AND status='draft'").bind(message.message_id, poll.id).run();
-  await send(env, env.ADMIN_TELEGRAM_USER_ID, `Голосування №${poll.id} опубліковано в групі «${group.title}».\n/results ${poll.id} — результати\n/close ${poll.id} — завершити`);
+  await env.HOME_DB.prepare("UPDATE polls SET message_id=?, status='open',published_at=unixepoch(),ends_at=CASE WHEN duration_days>0 THEN unixepoch()+duration_days*86400 ELSE NULL END,next_repost_at=CASE WHEN repost_interval>0 THEN unixepoch()+repost_interval ELSE NULL END WHERE id=? AND status='draft'").bind(message.message_id, poll.id).run();
+  if(durationDays>0)await refreshPoll(env,poll.id);
+  const {pollControls}=await import('./poll-reposting.ts');
+  await pollControls(env,poll.id);
   return true;
 }
-async function livePollView(env: Env, poll: Poll) {
+export async function livePollView(env: Env, poll: Poll) {
   const options = JSON.parse(poll.options) as string[];
   const { results } = await env.HOME_DB.prepare('SELECT option_index,COUNT(*) AS count FROM premise_votes WHERE poll_id=? GROUP BY option_index').bind(poll.id).all<{ option_index: number; count: number }>();
   const counts = new Map(results.map(r => [r.option_index, r.count]));
   return {
-    text: pollCard(poll.id, poll.question, options, counts, false),
-    buttons: [
+    text: pollCard(poll.id, poll.question, options, counts, poll.status==='closed',{endsAt:poll.ends_at,closedAt:poll.closed_at}),
+    buttons: poll.status==='closed'?[]:[
       ...options.map((text, index) => [{ text: `${text} · ${counts.get(index) || 0}`, callback_data: `vote:${poll.id}:${index}` }]),
     ],
   };
 }
 interface Intent { token:string; user_id:number; poll_id:number; option_index:number; expires_at:number; bulk_ids:string|null }
 export async function refreshPoll(env:Env,id:number) {
-  const poll=await env.HOME_DB.prepare('SELECT * FROM polls WHERE id=?').bind(id).first<Poll>();
-  if(!poll || poll.status!=='open' || !poll.message_id || !isConnected(await getGroup(env,poll.chat_id)))return;
-  const view=await livePollView(env,poll);
-  await telegram(env,'editMessageText',{chat_id:poll.chat_id,message_id:poll.message_id,text:view.text,parse_mode:'HTML',reply_markup:{inline_keyboard:view.buttons}});
+  for(let attempt=0;attempt<3;attempt++){
+    const poll=await env.HOME_DB.prepare('SELECT * FROM polls WHERE id=?').bind(id).first<Poll>();
+    if(!poll || poll.status==='draft' || !poll.message_id || !isConnected(await getGroup(env,poll.chat_id)))return;
+    const view=await livePollView(env,poll);
+    try{
+      await telegram(env,'editMessageText',{chat_id:poll.chat_id,message_id:poll.message_id,text:view.text,parse_mode:'HTML',reply_markup:{inline_keyboard:view.buttons}});
+    }catch(error){
+      const latest=await env.HOME_DB.prepare('SELECT message_id FROM polls WHERE id=?').bind(id).first<{message_id:number}>();
+      if(latest&&latest.message_id!==poll.message_id)continue;
+      throw error;
+    }
+    const latest=await env.HOME_DB.prepare('SELECT message_id,status FROM polls WHERE id=?').bind(id).first<{message_id:number;status:string}>();
+    if(!latest||(latest.message_id===poll.message_id&&latest.status===poll.status))return;
+  }
+  throw new Error('Poll changed during refresh');
 }
 function castStatement(env:Env,poll:Poll,uid:number,premiseId:number,option:number) {
   return env.HOME_DB.prepare(`INSERT INTO premise_votes(poll_id,premise_id,user_id,option_index,voter_name,voter_role)
     SELECT p.id,u.id,m.user_id,?,profile.name,m.role FROM polls p JOIN premises u ON u.chat_id=p.chat_id
     JOIN memberships m ON m.premise_id=u.id JOIN profiles profile ON profile.user_id=m.user_id JOIN groups g ON g.chat_id=p.chat_id
-    WHERE p.id=? AND p.status='open' AND u.id=? AND m.user_id=? AND m.status='approved'
+    WHERE p.id=? AND p.status='open' AND (p.ends_at IS NULL OR p.ends_at>unixepoch()) AND u.id=? AND m.user_id=? AND m.status='approved'
     AND profile.phone GLOB '+380[1-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]' AND g.status='approved' AND g.bot_present=1
     ON CONFLICT(poll_id,premise_id) DO UPDATE SET option_index=excluded.option_index,updated_at=unixepoch()
     WHERE premise_votes.user_id=excluded.user_id`).bind(option,poll.id,premiseId,uid);
@@ -78,7 +94,7 @@ async function alreadyVoted(env:Env,uid:number,pollId:number,premiseId:number) {
 async function validIntent(env:Env,uid:number,token:string) {
   const intent=await env.HOME_DB.prepare('SELECT * FROM vote_intents WHERE token=? AND user_id=? AND expires_at>unixepoch()').bind(token,uid).first<Intent>();
   if(!intent)return null;
-  const poll=await env.HOME_DB.prepare("SELECT * FROM polls WHERE id=? AND status='open'").bind(intent.poll_id).first<Poll>();
+  const poll=await env.HOME_DB.prepare("SELECT * FROM polls WHERE id=? AND status='open' AND (ends_at IS NULL OR ends_at>unixepoch())").bind(intent.poll_id).first<Poll>();
   if(!poll||!isConnected(await getGroup(env,poll.chat_id)))return null;
   const options=JSON.parse(poll.options) as string[];
   if(!Number.isInteger(intent.option_index)||!options[intent.option_index])return null;
@@ -108,7 +124,7 @@ export async function vote(env: Env, query: Callback) {
   const [,rawId,rawOption]=(query.data||'').split(':');
   const pollId=positiveId(rawId);const option=/^\d+$/.test(rawOption||'')?Number(rawOption):-1;
   const poll=pollId?await env.HOME_DB.prepare('SELECT * FROM polls WHERE id=?').bind(pollId).first<Poll>():null;
-  if(!poll||poll.status!=='open'||!query.message||query.message.chat.id!==poll.chat_id||query.message.message_id!==poll.message_id||!isConnected(await getGroup(env,poll.chat_id)))return answer(env,query.id,'Голосування недоступне або завершене.');
+  if(!poll||poll.status!=='open'||(poll.ends_at!=null&&poll.ends_at<=Math.floor(Date.now()/1000))||!query.message||query.message.chat.id!==poll.chat_id||query.message.message_id!==poll.message_id||!isConnected(await getGroup(env,poll.chat_id)))return answer(env,query.id,'Голосування недоступне або завершене.');
   const options=JSON.parse(poll.options) as string[];
   if(!Number.isInteger(option)||option<0||option>=options.length)return answer(env,query.id,'Некоректна відповідь.');
   const units=await ownMemberships(env,query.from.id,poll.chat_id,true);
@@ -153,16 +169,18 @@ export async function privateVoteCallback(env:Env,q:Callback):Promise<boolean> {
   await openVoteIntent(env,q.from.id,token);return true;
 }
 export async function pollResults(env: Env, id: number, close: boolean) {
-  const poll = await env.HOME_DB.prepare('SELECT * FROM polls WHERE id=?').bind(id).first<Poll>();
+  let poll = await env.HOME_DB.prepare('SELECT * FROM polls WHERE id=?').bind(id).first<Poll>();
   if (!poll || poll.status === 'draft') return send(env, env.ADMIN_TELEGRAM_USER_ID, 'Голосування не знайдено або ще не опубліковано.');
   // Close first so subsequent votes cannot change the final tally.
-  if (close) await env.HOME_DB.prepare("UPDATE polls SET status='closed' WHERE id=?").bind(id).run();
+  if (close) {
+    const {finishPoll}=await import('./poll-finishing.ts');
+    await finishPoll(env,id);
+    poll=await env.HOME_DB.prepare('SELECT * FROM polls WHERE id=?').bind(id).first<Poll>();
+    if(!poll)return;
+  }
   const { results } = await env.HOME_DB.prepare('SELECT option_index, COUNT(*) AS count FROM premise_votes WHERE poll_id=? GROUP BY option_index').bind(id).all<{ option_index: number; count: number }>();
   const counts = new Map(results.map(r => [r.option_index, r.count]));
   const options = JSON.parse(poll.options) as string[];
-  const text = pollCard(id, poll.question, options, counts, close || poll.status === 'closed');
-  if (close && poll.message_id && isConnected(await getGroup(env, poll.chat_id))) {
-    await telegram(env, 'editMessageText', { chat_id: poll.chat_id, message_id: poll.message_id, text, parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } });
-  }
+  const text = pollCard(id, poll.question, options, counts, close || poll.status === 'closed',{endsAt:poll.ends_at,closedAt:poll.closed_at});
   return sendHtml(env, env.ADMIN_TELEGRAM_USER_ID, text);
 }

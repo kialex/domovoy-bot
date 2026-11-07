@@ -43,7 +43,7 @@ export async function groupMembership(env: Env, event: ChatMemberUpdate, updateI
     .bind(event.chat.id, title, status, Number(present), event.from.id, version, updateId).run();
   if (!result.meta.changes) return;
   if (!present) {
-    await env.HOME_DB.prepare("UPDATE polls SET status='closed' WHERE chat_id=? AND status='open'").bind(event.chat.id).run();
+    await env.HOME_DB.prepare("UPDATE polls SET status='closed',next_repost_at=NULL WHERE chat_id=? AND status='open'").bind(event.chat.id).run();
     if (previous?.status === 'approved') await send(env, env.ADMIN_TELEGRAM_USER_ID, `Бота видалено з групи ${title}. Підключення вимкнено, відкриті голосування закрито.`);
     return;
   }
@@ -101,7 +101,7 @@ export async function groupCallback(env: Env, q: Callback, updateId: number): Pr
   if (action === 'disconnect' && g.status === 'approved') {
     await env.HOME_DB.batch([
       env.HOME_DB.prepare("UPDATE groups SET status='disconnected',version=? WHERE chat_id=? AND version=?").bind(updateId, id, g.version),
-      env.HOME_DB.prepare("UPDATE polls SET status='closed' WHERE chat_id=? AND status='open'").bind(id),
+      env.HOME_DB.prepare("UPDATE polls SET status='closed',next_repost_at=NULL WHERE chat_id=? AND status='open'").bind(id),
     ]);
     await answer(env, q.id, 'Групу від’єднано.');
     await send(env, q.from.id, `${g.title} від’єднано. Інші групи залишаються підключеними.`); return true;

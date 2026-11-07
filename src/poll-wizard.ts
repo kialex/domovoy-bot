@@ -1,13 +1,15 @@
+import { durationLabel, POLL_DURATIONS, validDuration, intervalLabel, REPOST_INTERVALS, validInterval } from './poll-settings.ts';
 import { RESIDENT_ACTIONS } from './resident-menu.ts';
 import { connectedGroups, getGroup, groupId, isConnected } from './groups.ts';
 import type { Button, Callback, Env, Message } from './env.ts';
 import { createPoll } from './polls.ts';
 import { answer, send, telegram } from './telegram.ts';
 
-interface Draft { token: string; source_update_id: number; step: string; question: string; options: string; chat_id: number | null; group_version: number | null }
+interface Draft { token: string; source_update_id: number; step: string; question: string; options: string; chat_id: number | null; group_version: number | null; repost_interval: number | null; duration_days:number|null }
 const cancelButton = (token: string): Button[] => [{ text: 'Скасувати', callback_data: `draft:cancel:${token}` }];
 export const ADMIN_ACTIONS = {
   poll: '🗳 Створити голосування',
+  polls: '📋 Мої голосування',
   pending: '👥 Заявки мешканців',
   groups: '🏘 Мої групи',
   menu: '🏠 Головне меню',
@@ -19,6 +21,7 @@ export async function adminMenu(env: Env) {
     commands: [
       { command: 'menu', description: 'Головне меню' },
       { command: 'poll', description: 'Створити голосування' },
+      { command: 'polls', description: 'Керувати голосуваннями' },
       { command: 'pending', description: 'Заявки мешканців' },
       { command: 'cancel', description: 'Скасувати заповнення' },
     ],
@@ -29,7 +32,7 @@ export async function adminMenu(env: Env) {
     text: 'HomeBot 🏡\nОберіть дію на клавіатурі внизу чату.\n\nЯкщо клавіатура прихована, відкрийте її значком біля поля вводу. Команда /menu також повертає це меню.',
     reply_markup: {
       keyboard: [
-        [{ text: ADMIN_ACTIONS.poll }],
+        [{ text: ADMIN_ACTIONS.poll }, { text: ADMIN_ACTIONS.polls }],
         [{ text: ADMIN_ACTIONS.pending }, { text: ADMIN_ACTIONS.groups }],
         [{ text: RESIDENT_ACTIONS.data }, { text: RESIDENT_ACTIONS.units }],
         [{ text: RESIDENT_ACTIONS.add }, { text: RESIDENT_ACTIONS.polls }],
@@ -52,7 +55,7 @@ export async function startPollWizard(env: Env, updateId: number) {
   if (!groups.length) return send(env, env.ADMIN_TELEGRAM_USER_ID, 'Спочатку підключіть групу: додайте бота до неї та підтвердіть заявку в особистому чаті.', [[{ text: 'Мої групи', callback_data: 'admin:groups' }]]);
   const token = crypto.randomUUID().slice(0, 8);
   await env.HOME_DB.prepare(`INSERT INTO poll_drafts(user_id,token,source_update_id,step) VALUES (?,?,?,'question')
-    ON CONFLICT(user_id) DO UPDATE SET token=excluded.token,source_update_id=excluded.source_update_id,step='question',question=NULL,options='[]',chat_id=NULL,group_version=NULL`)
+    ON CONFLICT(user_id) DO UPDATE SET token=excluded.token,source_update_id=excluded.source_update_id,step='question',question=NULL,options='[]',chat_id=NULL,group_version=NULL,repost_interval=NULL,duration_days=NULL`)
     .bind(env.ADMIN_TELEGRAM_USER_ID, token, updateId).run();
   if (groups.length > 1) return choosePollGroup(env, token);
   await env.HOME_DB.prepare('UPDATE poll_drafts SET chat_id=?,group_version=? WHERE user_id=? AND token=?').bind(groups[0].chat_id, groups[0].version, env.ADMIN_TELEGRAM_USER_ID, token).run();
@@ -68,6 +71,24 @@ async function choosePollGroup(env: Env, token: string, page = 0) {
   buttons.push(cancelButton(token));
   return send(env, env.ADMIN_TELEGRAM_USER_ID, 'У якій групі опублікувати голосування?', buttons);
 }
+async function durationChoice(env:Env,token:string){
+  const buttons:Button[][]=POLL_DURATIONS.map(days=>[{text:durationLabel(days),callback_data:`draft:duration:${token}:${days}`}]);
+  buttons.push(cancelButton(token));
+  return send(env,env.ADMIN_TELEGRAM_USER_ID,'📅 Скільки триватиме голосування?\n\nПісля завершення бот перестане приймати голоси, опублікує окремий підсумок і прибере повідомлення з кнопками. Час показується за Києвом.',buttons);
+}
+async function intervalChoice(env: Env, token: string) {
+  const buttons:Button[][]=REPOST_INTERVALS.map(seconds=>[{text:intervalLabel(seconds),callback_data:`draft:interval:${token}:${seconds}`}]);
+  buttons.push(cancelButton(token));
+  return send(env,env.ADMIN_TELEGRAM_USER_ID,'⏱ Як часто піднімати голосування?\n\nБот публікуватиме свіжу копію зі збереженими голосами та прибиратиме стару. Інтервал відраховується від останньої публікації; після ручного підняття відлік починається заново.',buttons);
+}
+async function preview(env:Env,draft:Draft,groupTitle:string) {
+  const options=JSON.parse(draft.options) as string[];
+  return send(env,env.ADMIN_TELEGRAM_USER_ID,`Попередній перегляд\nГрупа: ${groupTitle}\n\n${draft.question}\n\n${options.map((o,i)=>`${i+1}. ${o}`).join('\n')}\n\n📅 Тривалість: ${durationLabel(draft.duration_days!)}\n⏱ Підняття: ${intervalLabel(draft.repost_interval!)}\nОдин голос від приміщення.`,[
+    [{text:'✅ Опублікувати в групі',callback_data:`draft:publish:${draft.token}`}],
+    [{text:'📅 Змінити тривалість',callback_data:`draft:durationmenu:${draft.token}`}],
+    [{text:'⏱ Змінити інтервал',callback_data:`draft:intervalmenu:${draft.token}`}],cancelButton(draft.token),
+  ]);
+}
 export async function cancelPollWizard(env: Env) {
   await env.HOME_DB.prepare('DELETE FROM poll_drafts WHERE user_id=?').bind(env.ADMIN_TELEGRAM_USER_ID).run();
 }
@@ -80,6 +101,8 @@ export async function pollWizardMessage(env: Env, message: Message): Promise<boo
   if (!draft || draft.step === 'published') return false;
   if (!draft.chat_id) { await choosePollGroup(env, draft.token); return true; }
   const text = message.text?.trim() || '';
+  if (draft.step === 'duration') { await durationChoice(env,draft.token); return true; }
+  if (draft.step === 'interval') { await intervalChoice(env,draft.token); return true; }
   if (draft.step === 'preview') {
     await send(env, message.chat.id, 'Перевірте попередній перегляд і натисніть «Опублікувати» або «Скасувати».');
     return true;
@@ -150,17 +173,49 @@ export async function pollWizardCallback(env: Env, q: Callback, updateId: number
     await answer(env, q.id, 'Підключення групи змінилося. Скасуйте чернетку та оберіть групу знову.'); return true;
   }
   const options = JSON.parse(draft.options) as string[];
-  if (action === 'preview' && ['options', 'preview'].includes(draft.step) && options.length >= 2) {
-    await env.HOME_DB.prepare("UPDATE poll_drafts SET step='preview' WHERE user_id=? AND token=?").bind(q.from.id, token).run();
-    await answer(env, q.id, 'Попередній перегляд.');
-    await send(env, q.from.id, `Попередній перегляд\nГрупа: ${group.title}\n\n${draft.question}\n\n${options.map((o, i) => `${i + 1}. ${o}`).join('\n')}\n\nОдин голос від квартири. Після публікації мешканці отримають це голосування в групі.`, [
-      [{ text: '✅ Опублікувати в групі', callback_data: `draft:publish:${token}` }], cancelButton(token),
-    ]); return true;
+  if(action==='durationmenu' && draft.step==='preview'){
+    await env.HOME_DB.prepare("UPDATE poll_drafts SET step='duration' WHERE user_id=? AND token=?").bind(q.from.id,token).run();
+    await answer(env,q.id,'Оберіть тривалість.');await durationChoice(env,token);return true;
   }
-  if (action === 'publish' && draft.step === 'preview' && options.length >= 2) {
+  if(action==='duration' && draft.step==='duration'){
+    const days=Number(target);
+    if(!/^\d+$/.test(target||'')||!validDuration(days)){await answer(env,q.id,'Оберіть запропонований строк.');return true;}
+    const step=draft.repost_interval===null?'interval':'preview';
+    await env.HOME_DB.prepare('UPDATE poll_drafts SET duration_days=?,step=? WHERE user_id=? AND token=?').bind(days,step,q.from.id,token).run();
+    await answer(env,q.id,'Строк збережено.');
+    if(step==='interval')await intervalChoice(env,token);else await preview(env,{...draft,duration_days:days,step},group.title);
+    return true;
+  }
+  if (action === 'intervalmenu' && draft.step === 'preview') {
+    await env.HOME_DB.prepare("UPDATE poll_drafts SET step='interval' WHERE user_id=? AND token=?").bind(q.from.id,token).run();
+    await answer(env,q.id,'Оберіть інтервал.');await intervalChoice(env,token);return true;
+  }
+  if (action === 'interval' && draft.step === 'interval') {
+    const seconds=Number(target);
+    if (!/^\d+$/.test(target || '') || !validInterval(seconds)) { await answer(env,q.id,'Оберіть один із запропонованих інтервалів.');return true; }
+    const step=draft.duration_days===null?'duration':'preview';
+    await env.HOME_DB.prepare('UPDATE poll_drafts SET repost_interval=?,step=? WHERE user_id=? AND token=?').bind(seconds,step,q.from.id,token).run();
+    await answer(env,q.id,'Інтервал збережено.');
+    if(step==='duration')await durationChoice(env,token);else await preview(env,{...draft,repost_interval:seconds,step},group.title);return true;
+  }
+  if (action === 'preview' && ['options','preview'].includes(draft.step) && options.length >= 2) {
+    if(draft.duration_days===null){await env.HOME_DB.prepare("UPDATE poll_drafts SET step='duration' WHERE user_id=? AND token=?").bind(q.from.id,token).run();await answer(env,q.id,'Оберіть тривалість.');await durationChoice(env,token);return true;}
+    if (draft.repost_interval===null) {
+      await env.HOME_DB.prepare("UPDATE poll_drafts SET step='interval' WHERE user_id=? AND token=?").bind(q.from.id,token).run();
+      await answer(env,q.id,'Оберіть частоту підняття.');await intervalChoice(env,token);return true;
+    }
+    await env.HOME_DB.prepare("UPDATE poll_drafts SET step='preview' WHERE user_id=? AND token=?").bind(q.from.id,token).run();
+    await answer(env,q.id,'Попередній перегляд.');await preview(env,draft,group.title);return true;
+  }
+  if(action==='publish'&&draft.step==='preview'&&draft.duration_days===null){await env.HOME_DB.prepare("UPDATE poll_drafts SET step='duration' WHERE user_id=? AND token=?").bind(q.from.id,token).run();await answer(env,q.id,'Спочатку оберіть тривалість.');await durationChoice(env,token);return true;}
+  if (action === 'publish' && draft.step === 'preview' && draft.repost_interval === null) {
+    await env.HOME_DB.prepare("UPDATE poll_drafts SET step='interval' WHERE user_id=? AND token=?").bind(q.from.id,token).run();
+    await answer(env,q.id,'Спочатку оберіть інтервал підняття.');await intervalChoice(env,token);return true;
+  }
+  if (action === 'publish' && draft.step === 'preview' && draft.repost_interval !== null && draft.duration_days !== null && options.length >= 2) {
     await answer(env, q.id, 'Публікую голосування.');
     // Stable source ID prevents repeated Publish taps from creating multiple polls.
-    const published = await createPoll(env, { question: draft.question, options }, draft.source_update_id, group.chat_id, group.version);
+    const published = await createPoll(env, { question: draft.question, options }, draft.source_update_id, group.chat_id, group.version, draft.repost_interval, draft.duration_days);
     if (!published) return true;
     await env.HOME_DB.prepare("UPDATE poll_drafts SET step='published' WHERE user_id=? AND token=?").bind(q.from.id, token).run();
     await adminMenu(env); return true;

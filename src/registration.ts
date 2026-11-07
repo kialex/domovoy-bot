@@ -60,7 +60,7 @@ async function showForm(env: Env, s: Session) {
   const max = f.entrance === 1 ? 14 : f.entrance === 2 ? 9 : 10;
   const prompts: Record<string,string> = {
     kind: 'Що бажаєте зареєструвати?\nОберіть тип приміщення кнопкою.',
-    number: 'Напишіть номер квартири від 1 до 187.\nНаприклад: 42. Під’їзд визначимо автоматично.',
+    number: 'Напишіть номер квартири.\nНаприклад: 42 або 84А. Дозволена тільки буква А (українська або латинська). Під’їзд визначимо за числовою частиною.',
     business_name: 'Як називається ваша комерція?\nНаприклад: Аптека або Кав’ярня. Від 2 до 100 символів.',
     floor: `Під’їзд ${f.entrance} визначено.\nНа якому поверсі ви знаходитесь? Напишіть цифру від ${min} до ${max}.`,
     name: 'Напишіть ім’я та прізвище контактної особи.\nНаприклад: Олена Коваль.',
@@ -105,7 +105,7 @@ export async function registrationMessage(env: Env, m: Message) {
   if (s.step === 'number') {
     if (f.kind === 'apartment') {
       const number = apartmentNumber(value); const entrance = number ? entranceForApartment(number) : null;
-      if (!number || !entrance) return plainCard(env,s.user_id,'🚪 Номер квартири не підходить\nНапишіть цифрами номер від 1 до 187.');
+      if (!number || !entrance) return plainCard(env,s.user_id,'🚪 Номер квартири не підходить\nВкажіть номер, наприклад 42 або 84А. Числова частина має бути від 1 до 187. Дозволена тільки буква А, без пробілу: 84А або 84A.');
       f.number = number; f.entrance = entrance;
     }
   } else if (s.step === 'floor') {
@@ -201,7 +201,7 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
     p = old.find(item => commercialKey(item.business_name) === f.number) || null;
   }
   if (!p) {
-    const number = f.kind === 'apartment' ? Number(f.number) : 0;
+    const number = f.kind === 'apartment' ? Number.parseInt(f.number!,10) : 0;
     await env.HOME_DB.prepare('INSERT INTO premises(chat_id,kind,number,business_name,entrance,floor,number_start,number_end) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(chat_id,kind,number) DO NOTHING')
       .bind(s.chat_id,f.kind,f.number!,f.business_name || '',f.kind === 'apartment' ? f.entrance! : null,f.kind === 'apartment' ? f.floor! : null,number,number).run();
     p = await env.HOME_DB.prepare('SELECT * FROM premises WHERE chat_id=? AND kind=? AND number=?').bind(s.chat_id,f.kind,f.number!).first<Premise>();

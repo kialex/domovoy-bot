@@ -33,17 +33,18 @@ function harness(groups=1) {
   for(let i=1;i<=groups;i++)sqlite.prepare("INSERT INTO groups(chat_id,title,status,bot_present,added_by,version,last_event_id) VALUES (?,?,'approved',1,1,1,1)").run(-100000-i,`House ${i}`);
   const env={HOME_DB:db,TELEGRAM_BOT_TOKEN:'test',TELEGRAM_WEBHOOK_SECRET:'secret',ADMIN_TELEGRAM_USER_ID:'1'};
   const calls=[];let update=1000,message=9000;const oldFetch=globalThis.fetch;
-  const h={sqlite,env,calls,fail:null,lastUpdate:null,
+  const h={sqlite,env,calls,fail:null,apiOverride:null,lastUpdate:null,
     async post(data,secret='secret') {return worker.fetch(new Request('https://home.test/telegram/webhook',{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Bot-Api-Secret-Token':secret},body:JSON.stringify(data)}),env);},
     async dispatch(data){h.lastUpdate={update_id:++update,...data};const r=await h.post(h.lastUpdate);assert.equal(r.status,200,'Webhook must handle the test update');return h.lastUpdate;},
     async msg(uid,text){return h.dispatch({message:{message_id:++message,chat:{id:uid,type:'private'},from:{id:uid},text}});},
     async cb(uid,data,groupMessage){return h.dispatch({callback_query:{id:String(++message),from:{id:uid},data,message:groupMessage||{message_id:message,chat:{id:uid,type:'private'}}}});},
     form(uid){return sqlite.prepare('SELECT * FROM sessions WHERE user_id=?').get(uid);},
-    member(uid,number,chat=-100001,kind='apartment'){return sqlite.prepare('SELECT m.*,p.number,p.chat_id,p.kind FROM memberships m JOIN premises p ON p.id=m.premise_id WHERE m.user_id=? AND p.number=? AND p.chat_id=? AND p.kind=?').get(uid,kind==='commercial'?commercialKey(number):number,chat,kind);},
+    member(uid,number,chat=-100001,kind='apartment'){return sqlite.prepare('SELECT m.*,p.number,p.chat_id,p.kind FROM memberships m JOIN premises p ON p.id=m.premise_id WHERE m.user_id=? AND p.number=? AND p.chat_id=? AND p.kind=?').get(uid,kind==='commercial'?commercialKey(number):apartmentNumber(number),chat,kind);},
     nextId(){return ++update;},close(){globalThis.fetch=oldFetch;sqlite.close();},
   };
   globalThis.fetch=async(url,init)=>{
-    const method=url.split('/').at(-1);calls.push({method,...JSON.parse(init.body)});
+    const method=url.split('/').at(-1);const body=JSON.parse(init.body);calls.push({method,...body});
+    if(h.apiOverride){const response=await h.apiOverride(method,body);if(response)return response;}
     if(h.fail===method)return Response.json({ok:false},{status:503});
     return Response.json({ok:true,result:{username:'HomeTestBot',message_id:++message}});
   };
@@ -65,12 +66,14 @@ async function register(h,uid,{number='25',kind='apartment',floor='2',entrance='
   if(approve&&m.status==='pending')await h.cb(1,`review:approve:${m.id}:${m.application_token}`);
   return h.member(uid,kind==='commercial'?business:number,chat,kind);
 }
-async function poll(h,chat=-100001) {
+async function poll(h,chat=-100001,interval=0,duration=0) {
   await h.msg(1,'🗳 Створити голосування');
   const d=h.sqlite.prepare('SELECT * FROM poll_drafts').get();assert.ok(d);
   if(!d.chat_id){const g=h.sqlite.prepare('SELECT * FROM groups WHERE chat_id=?').get(chat);await h.cb(1,`draft:group:${d.token}:${chat}:${g.version}`);}
   await h.msg(1,'Repair <lift> & entrance?');await h.msg(1,'Yes');await h.msg(1,'No');
-  await h.cb(1,`draft:preview:${d.token}`);await h.cb(1,`draft:publish:${d.token}`);
+  await h.cb(1,`draft:preview:${d.token}`);assert.equal(h.sqlite.prepare('SELECT step FROM poll_drafts').get().step,'duration');
+  await h.cb(1,`draft:duration:${d.token}:${duration}`);assert.equal(h.sqlite.prepare('SELECT step FROM poll_drafts').get().step,'interval');
+  await h.cb(1,`draft:interval:${d.token}:${interval}`);await h.cb(1,`draft:publish:${d.token}`);
   return h.sqlite.prepare('SELECT * FROM polls ORDER BY id DESC LIMIT 1').get();
 }
 const groupMessage=p=>({message_id:p.message_id,chat:{id:p.chat_id,type:'supergroup'}});
@@ -141,7 +144,8 @@ test('one premise vote stays in group, live counts update, other resident cannot
     assert.match(h.calls.at(-1).text,/Person 2/);assert.match(h.calls.at(-1).text,/Власник/);assert.equal(h.calls.at(-1).method,'answerCallbackQuery');
     await cast(h,2,p,1);assert.equal(currentVotes(h)[0].option_index,1,'only the original author may change their vote');
     await h.msg(1,`/close ${p.id}`);await cast(h,2,p,0);assert.equal(currentVotes(h)[0].option_index,1);
-    assert.deepEqual(h.calls.filter(c=>c.method==='editMessageText').at(-1).reply_markup.inline_keyboard,[]);
+    const outcome=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).at(-1);assert.match(outcome.text,/ГОЛОСУВАННЯ ЗАВЕРШЕНО/);assert.equal(outcome.reply_markup,undefined);
+    assert.ok(h.calls.some(c=>c.method==='deleteMessage'&&c.message_id===p.message_id));
   }finally{h.close();}
 });
 
@@ -323,4 +327,233 @@ test('bulk vote changes only the requesting authors own votes',async()=>{
     assert.equal(currentVotes(h).find(v=>v.premise_id===b.premise_id).option_index,1);
     assert.match(h.calls.at(-1).text,/Person 2/);
   }finally{h.close();}
+});
+
+test('wizard interval selection is mandatory, validated and saved with scheduled time',async()=>{
+  const h=harness();try{
+    await h.msg(1,'🗳 Створити голосування');const d=h.sqlite.prepare('SELECT * FROM poll_drafts').get();
+    await h.msg(1,'Question');await h.msg(1,'Yes');await h.msg(1,'No');await h.cb(1,`draft:preview:${d.token}`);
+    assert.equal(h.sqlite.prepare('SELECT step FROM poll_drafts').get().step,'duration');
+    await h.cb(1,`draft:duration:${d.token}:0`);
+    await h.cb(1,`draft:publish:${d.token}`);assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM polls').get().n,0);
+    await h.cb(2,`draft:interval:${d.token}:3600`);assert.equal(h.sqlite.prepare('SELECT repost_interval FROM poll_drafts').get().repost_interval,null);
+    await h.cb(1,`draft:interval:${d.token}:99`);assert.equal(h.sqlite.prepare('SELECT step FROM poll_drafts').get().step,'interval');
+    await h.cb(1,`draft:interval:${d.token}:86400`);assert.match(h.calls.at(-1).text,/Раз на добу/);
+    await h.cb(1,`draft:intervalmenu:${d.token}`);await h.cb(1,`draft:interval:${d.token}:21600`);
+    await h.cb(1,`draft:publish:${d.token}`);const p=h.sqlite.prepare('SELECT * FROM polls').get();
+    assert.equal(p.repost_interval,21600);assert.equal(p.next_repost_at,p.published_at+21600);
+    const controls=h.calls.find(c=>c.method==='sendMessage'&&c.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data===`pollctl:raise:${p.id}`));assert.ok(controls);
+  }finally{h.close();}
+});
+
+test('manual raise keeps all votes and private choices, publishes first, deletes old message and deduplicates retries',async()=>{
+  const {raisePoll}=await import('../src/poll-reposting.ts');
+  const h=harness();try{
+    await register(h,2,{number:'25'});await register(h,2,{number:'26'});const p=await poll(h,-100001,3600);
+    await cast(h,2,p,0);const intent=h.sqlite.prepare('SELECT * FROM vote_intents').get();const first=h.member(2,'25');
+    await h.cb(2,`cast:${intent.token}:${first.premise_id}`);const before=currentVotes(h);
+    const start=h.calls.length;assert.equal(await raisePoll(h.env,p.id,'manual-test'),'raised');
+    const fresh=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(p.id);assert.notEqual(fresh.message_id,p.message_id);
+    assert.deepEqual(currentVotes(h),before);assert.equal(fresh.next_repost_at,fresh.published_at+3600);
+    const actions=h.calls.slice(start);const sent=actions.findIndex(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id);const deleted=actions.findIndex(c=>c.method==='deleteMessage');
+    assert.ok(sent>=0&&deleted>sent);assert.equal(actions[deleted].message_id,p.message_id);assert.ok(actions.every(c=>c.method!=='deleteMessage'||c.message_id!==fresh.message_id));
+    const sendCount=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length;
+    assert.equal(await raisePoll(h.env,p.id,'manual-test'),'already');assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length,sendCount);
+    const second=h.member(2,'26');await h.cb(2,`cast:${intent.token}:${second.premise_id}`);assert.equal(currentVotes(h).length,2,'private intent remains valid after repost');
+    await h.cb(2,`pollctl:raise:${p.id}`);assert.equal(h.sqlite.prepare('SELECT message_id FROM polls WHERE id=?').get(p.id).message_id,fresh.message_id,'resident cannot raise');
+    await h.msg(1,'📋 Мої голосування');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`pollctl:show:${p.id}`));
+  }finally{h.close();}
+});
+
+test('scheduled raises run only for due open connected polls; manual-only and closed polls stay put',async()=>{
+  const {scheduledReposts,raisePoll}=await import('../src/poll-reposting.ts');
+  const h=harness();try{
+    const manual=await poll(h);const timed=await poll(h,-100001,10800);
+    const before=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===timed.chat_id).length;
+    await scheduledReposts(h.env);assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===timed.chat_id).length,before);
+    h.sqlite.prepare('UPDATE polls SET next_repost_at=unixepoch()-1 WHERE id=?').run(timed.id);
+    await scheduledReposts(h.env);const current=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(timed.id);assert.notEqual(current.message_id,timed.message_id);
+    assert.equal(h.sqlite.prepare('SELECT message_id FROM polls WHERE id=?').get(manual.id).message_id,manual.message_id);
+    await h.msg(1,`/close ${timed.id}`);assert.equal(h.sqlite.prepare('SELECT next_repost_at FROM polls WHERE id=?').get(timed.id).next_repost_at,null);
+    assert.equal(await raisePoll(h.env,timed.id,'closed-attempt'),'unavailable');
+    h.sqlite.prepare('UPDATE polls SET next_repost_at=0 WHERE id=?').run(timed.id);await scheduledReposts(h.env);
+    const finished=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(timed.id);assert.equal(finished.message_id,finished.result_message_id);assert.notEqual(finished.message_id,current.message_id);
+  }finally{h.close();}
+});
+
+test('failed send preserves original; scheduler backs off; active lease prevents competing reposts',async()=>{
+  const {raisePoll,scheduledReposts}=await import('../src/poll-reposting.ts');
+  const h=harness();try{
+    const p=await poll(h,-100001,3600);
+    h.sqlite.prepare("UPDATE polls SET repost_lease='other',repost_lease_until=unixepoch()+180 WHERE id=?").run(p.id);
+    assert.equal(await raisePoll(h.env,p.id,'busy'),'busy');assert.equal(h.calls.some(c=>c.method==='deleteMessage'),false);
+    h.sqlite.prepare('UPDATE polls SET repost_lease=NULL,repost_lease_until=NULL,next_repost_at=unixepoch()-1 WHERE id=?').run(p.id);
+    h.fail='sendMessage';await scheduledReposts(h.env);
+    const after=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(p.id);assert.equal(after.message_id,p.message_id);assert.equal(after.repost_lease,null);
+    assert.ok(after.next_repost_at>h.sqlite.prepare('SELECT unixepoch() AS now').get().now);assert.equal(h.calls.some(c=>c.method==='deleteMessage'),false);
+    h.fail=null;assert.equal(await raisePoll(h.env,p.id,'recover'),'raised');
+  }finally{h.close();}
+});
+
+test('old message deletion restriction removes vote buttons and updates redirect to newest copy',async()=>{
+  const {raisePoll}=await import('../src/poll-reposting.ts');const h=harness();try{
+    const p=await poll(h);
+    h.apiOverride=async(method,body)=>method==='deleteMessage'&&body.message_id===p.message_id?Response.json({ok:false,description:"Bad Request: message can't be deleted"},{status:400}):null;
+    assert.equal(await raisePoll(h.env,p.id,'redirect-one'),'raised');let fresh=h.sqlite.prepare('SELECT message_id FROM polls WHERE id=?').get(p.id).message_id;
+    let redirect=h.calls.filter(c=>c.method==='editMessageText'&&c.message_id===p.message_id).at(-1);
+    assert.ok(redirect.reply_markup.inline_keyboard.flat().every(b=>b.url&&!b.callback_data));assert.ok(redirect.reply_markup.inline_keyboard[0][0].url.endsWith(`/${fresh}`));
+    assert.equal(await raisePoll(h.env,p.id,'redirect-two'),'raised');fresh=h.sqlite.prepare('SELECT message_id FROM polls WHERE id=?').get(p.id).message_id;
+    redirect=h.calls.filter(c=>c.method==='editMessageText'&&c.message_id===p.message_id).at(-1);assert.ok(redirect.reply_markup.inline_keyboard[0][0].url.endsWith(`/${fresh}`));
+  }finally{h.close();}
+});
+
+test('closing while a replacement is being sent cannot reopen the poll or leave active duplicate buttons',async()=>{
+  const {raisePoll}=await import('../src/poll-reposting.ts');const h=harness();try{
+    const p=await poll(h,-100001,3600);const original=p.message_id;
+    h.apiOverride=async(method,body)=>{
+      if(method==='sendMessage'&&Number(body.chat_id)===p.chat_id){h.sqlite.prepare("UPDATE polls SET status='closed',next_repost_at=NULL WHERE id=?").run(p.id);h.apiOverride=null;}
+      return null;
+    };
+    assert.equal(await raisePoll(h.env,p.id,'close-race'),'unavailable');
+    const after=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(p.id);assert.equal(after.status,'closed');assert.equal(after.message_id,original);assert.equal(after.next_repost_at,null);
+    assert.ok(h.calls.some(c=>c.method==='deleteMessage'&&c.message_id!==original));
+  }finally{h.close();}
+});
+
+test('repost retry after a later raise does not publish the earlier request again',async()=>{
+  const {raisePoll}=await import('../src/poll-reposting.ts');const h=harness();try{
+    const p=await poll(h);assert.equal(await raisePoll(h.env,p.id,'first-request'),'raised');assert.equal(await raisePoll(h.env,p.id,'second-request'),'raised');
+    const latest=h.sqlite.prepare('SELECT message_id FROM polls WHERE id=?').get(p.id).message_id;
+    const before=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length;
+    assert.equal(await raisePoll(h.env,p.id,'first-request'),'already');assert.equal(h.sqlite.prepare('SELECT message_id FROM polls WHERE id=?').get(p.id).message_id,latest);
+    assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length,before);
+  }finally{h.close();}
+});
+
+test('cleanup retry removes an old copy after a transient deletion error without publishing again',async()=>{
+  const {raisePoll,cleanupPollCopies}=await import('../src/poll-reposting.ts');const h=harness();try{
+    const p=await poll(h);h.fail='deleteMessage';assert.equal(await raisePoll(h.env,p.id,'transient'),'raised');
+    assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM poll_message_cleanup').get().n,1);
+    const before=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length;
+    h.fail=null;await cleanupPollCopies(h.env);
+    assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM poll_message_cleanup').get().n,0);
+    assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length,before);
+  }finally{h.close();}
+});
+
+test('reposting migration preserves existing polls and requires interval selection for an old preview',()=>{
+  const {sqlite}=database('0008');try{
+    sqlite.exec(`INSERT INTO polls(source_update_id,question,options,chat_id,status,created_by,message_id) VALUES (1,'Existing','["Yes","No"]',-100001,'open',1,44);
+      INSERT INTO poll_drafts(user_id,token,source_update_id,step,question,options,chat_id,group_version) VALUES (1,'old',2,'preview','Draft','["Yes","No"]',-100001,1);`);
+    sqlite.exec(readFileSync(new URL('../migrations/0008_poll_reposting.sql',import.meta.url),'utf8'));
+    const p=sqlite.prepare('SELECT * FROM polls').get();assert.equal(p.status,'open');assert.equal(p.message_id,44);assert.equal(p.repost_interval,0);assert.equal(p.next_repost_at,null);
+    const d=sqlite.prepare('SELECT * FROM poll_drafts').get();assert.equal(d.token,'old');assert.equal(d.step,'preview');assert.equal(d.repost_interval,null);
+    assert.equal(sqlite.prepare('PRAGMA foreign_key_check').all().length,0);
+  }finally{sqlite.close();}
+});
+
+test('refresh follows a reposted message and repairs an open card if the poll closes mid-edit',async()=>{
+  const {refreshPoll}=await import('../src/polls.ts');const h=harness();try{
+    const p=await poll(h);
+    h.apiOverride=async(method,body)=>{
+      if(method==='editMessageText'&&body.message_id===p.message_id){
+        h.sqlite.prepare('UPDATE polls SET message_id=777777 WHERE id=?').run(p.id);h.apiOverride=null;
+        return Response.json({ok:false,description:'Bad Request: message to edit not found'},{status:400});
+      }return null;
+    };
+    await refreshPoll(h.env,p.id);assert.equal(h.calls.filter(c=>c.method==='editMessageText').at(-1).message_id,777777);
+    h.apiOverride=async(method)=>{if(method==='editMessageText'){h.sqlite.prepare("UPDATE polls SET status='closed' WHERE id=?").run(p.id);h.apiOverride=null;}return null;};
+    await refreshPoll(h.env,p.id);const last=h.calls.filter(c=>c.method==='editMessageText').at(-1);assert.match(last.text,/ГОЛОСУВАННЯ ЗАВЕРШЕНО/);assert.deepEqual(last.reply_markup.inline_keyboard,[]);
+  }finally{h.close();}
+});
+
+test('lettered apartments are separate from numeric ones, but equivalent spellings share one premise',async()=>{
+  const h=harness();try{
+    const base=await register(h,2,{number:'84'});const letter=await register(h,2,{number:'84А'});
+    assert.notEqual(base.premise_id,letter.premise_id);
+    const p=h.sqlite.prepare('SELECT * FROM premises WHERE id=?').get(letter.premise_id);assert.equal(p.entrance,1);assert.equal(p.number_start,84);
+    const equivalent=await register(h,3,{number:'084a',role:'tenant'});assert.equal(equivalent.premise_id,letter.premise_id);
+    assert.equal(apartmentNumber('84a'),'84А');assert.equal(apartmentNumber('84а'),'84А');assert.equal(entranceForApartment('85А'),2);assert.equal(entranceForApartment('134А'),3);
+    assert.equal(entranceForApartment('188А'),null);assert.equal(apartmentNumber('84/1'),null);
+    for(const invalid of ['84Б','84B','84В','84C','84AB','84АА','84-А','84 А'])assert.equal(apartmentNumber(invalid),null);
+    await h.msg(3,'➕ Додати приміщення');const form=h.form(3);await h.cb(3,`reg:kind:${form.token}:apartment`);await h.msg(3,'84Б');assert.equal(h.form(3).step,'number');
+    const vote=await poll(h);await cast(h,2,vote,0);const intent=h.sqlite.prepare('SELECT * FROM vote_intents WHERE user_id=2').get();
+    await h.cb(2,`va:ask:${intent.token}`);await h.cb(2,`va:confirm:${intent.token}`);assert.equal(currentVotes(h).length,2);
+  }finally{h.close();}
+});
+
+test('deadline is chosen before interval and is not extended by raising a poll',async()=>{
+  const {raisePoll}=await import('../src/poll-reposting.ts');const h=harness();try{
+    await h.msg(1,'🗳 Створити голосування');const d=h.sqlite.prepare('SELECT * FROM poll_drafts').get();
+    await h.msg(1,'Time limited');await h.msg(1,'Yes');await h.msg(1,'No');await h.cb(1,`draft:preview:${d.token}`);
+    assert.equal(h.sqlite.prepare('SELECT step FROM poll_drafts').get().step,'duration');
+    await h.cb(1,`draft:duration:${d.token}:99`);assert.equal(h.sqlite.prepare('SELECT duration_days FROM poll_drafts').get().duration_days,null);
+    await h.cb(2,`draft:duration:${d.token}:5`);assert.equal(h.sqlite.prepare('SELECT duration_days FROM poll_drafts').get().duration_days,null);
+    await h.cb(1,`draft:duration:${d.token}:6`);await h.cb(1,`draft:interval:${d.token}:3600`);await h.cb(1,`draft:publish:${d.token}`);
+    const p=h.sqlite.prepare('SELECT * FROM polls').get();assert.equal(p.duration_days,6);assert.equal(p.ends_at,p.published_at+6*86400);
+    const originalEnd=p.ends_at;await raisePoll(h.env,p.id,'keep-deadline');assert.equal(h.sqlite.prepare('SELECT ends_at FROM polls WHERE id=?').get(p.id).ends_at,originalEnd);
+  }finally{h.close();}
+});
+
+test('expired votes are rejected immediately; scheduler posts one compact outcome before deleting original',async()=>{
+  const {scheduledReposts}=await import('../src/poll-reposting.ts');const h=harness();try{
+    await register(h,2);await register(h,3,{number:'26'});const p=await poll(h,-100001,3600,5);await cast(h,2,p,0);
+    h.sqlite.prepare('UPDATE polls SET ends_at=unixepoch()-1,next_repost_at=unixepoch()-1 WHERE id=?').run(p.id);
+    await cast(h,3,p,1);assert.equal(currentVotes(h).length,1,'deadline blocks voting before scheduled callback arrives');
+    const start=h.calls.length;await scheduledReposts(h.env);
+    const done=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(p.id);assert.equal(done.status,'closed');assert.equal(done.next_repost_at,null);assert.ok(done.result_message_id);assert.equal(done.message_id,done.result_message_id);
+    const actions=h.calls.slice(start);const outcomeIndex=actions.findIndex(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id);const deleteIndex=actions.findIndex(c=>c.method==='deleteMessage'&&c.message_id===p.message_id);
+    assert.ok(outcomeIndex>=0&&deleteIndex>outcomeIndex);const outcome=actions[outcomeIndex];assert.equal(outcome.reply_markup,undefined);
+    assert.ok(outcome.text.includes(`${'🟩'.repeat(5)} <b>Yes — 1 · 100%</b>`));assert.match(outcome.text,/Найбільше голосів/);assert.match(outcome.text,/Київ/);assert.ok(!outcome.text.includes('Person 2'));
+    const before=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length;
+    await scheduledReposts(h.env);await h.msg(1,`/close ${p.id}`);assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length,before);
+  }finally{h.close();}
+});
+
+test('failed final notification keeps data and original, blocks votes and retries publication later',async()=>{
+  const {scheduledReposts}=await import('../src/poll-reposting.ts');const h=harness();try{
+    await register(h,2);const p=await poll(h,-100001,3600,1);h.sqlite.prepare('UPDATE polls SET ends_at=unixepoch()-1 WHERE id=?').run(p.id);
+    h.fail='sendMessage';await scheduledReposts(h.env);let done=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(p.id);
+    assert.equal(done.status,'closed');assert.equal(done.result_message_id,null);assert.equal(done.message_id,p.message_id);assert.equal(done.repost_lease,null);
+    assert.equal(h.calls.some(c=>c.method==='deleteMessage'),false);
+    h.fail=null;await cast(h,2,p,0);assert.equal(currentVotes(h).length,0);await scheduledReposts(h.env);
+    done=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(p.id);assert.ok(done.result_message_id);assert.ok(h.calls.some(c=>c.method==='deleteMessage'&&c.message_id===p.message_id));
+  }finally{h.close();}
+});
+
+test('undeletable voting card is replaced with final text and no buttons',async()=>{
+  const {finishPoll}=await import('../src/poll-finishing.ts');const h=harness();try{
+    const p=await poll(h);h.apiOverride=async(method,body)=>method==='deleteMessage'&&body.message_id===p.message_id?Response.json({ok:false,description:"Bad Request: message can't be deleted"},{status:400}):null;
+    await finishPoll(h.env,p.id);const old=h.calls.filter(c=>c.method==='editMessageText'&&c.message_id===p.message_id).at(-1);
+    assert.match(old.text,/ГОЛОСУВАННЯ ЗАВЕРШЕНО/);assert.deepEqual(old.reply_markup.inline_keyboard,[]);assert.match(old.text,/Голосів не подано/);
+  }finally{h.close();}
+});
+
+test('private premise choices expire with the poll even before the scheduler closes it',async()=>{
+  const h=harness();try{
+    const unit=await register(h,2);await register(h,2,{number:'26'});const p=await poll(h,-100001,0,1);
+    await cast(h,2,p,0);const intent=h.sqlite.prepare('SELECT * FROM vote_intents WHERE user_id=2').get();
+    h.sqlite.prepare('UPDATE polls SET ends_at=unixepoch()-1 WHERE id=?').run(p.id);await h.cb(2,`cast:${intent.token}:${unit.premise_id}`);assert.equal(currentVotes(h).length,0);
+  }finally{h.close();}
+});
+
+test('compact final card handles empty polls, ties, exact percentages and Kyiv time',async()=>{
+  const {kyivDate}=await import('../src/presentation.ts');const until=Date.UTC(2026,10,12,17)/1000;
+  assert.match(kyivDate(until),/19:00/);
+  const active=pollCard(1,'Question',['Yes','No'],new Map(),false,{endsAt:until,now:until-5*86400});assert.match(active,/Залишилось: 5 дн/);
+  const tied=pollCard(1,'Question',['Yes','No'],new Map([[0,1],[1,1]]),true,{closedAt:until});assert.match(tied,/Однакова кількість голосів/);assert.ok(tied.includes('Yes — 1 · 50%'));
+  assert.ok(!tied.includes('Найбільше голосів'));
+  const empty=pollCard(1,'Question',['Yes','No'],new Map(),true,{closedAt:until});assert.match(empty,/Голосів не подано/);assert.ok(!empty.includes('NaN'));
+});
+
+test('deadline migration does not republish completed history or impose deadlines on existing open polls',()=>{
+  const {sqlite}=database('0009');try{
+    sqlite.exec(`INSERT INTO polls(source_update_id,question,options,chat_id,status,created_by,message_id) VALUES (1,'Closed','["Yes","No"]',-100001,'closed',1,44),(2,'Open','["Yes","No"]',-100001,'open',1,55);
+      INSERT INTO poll_drafts(user_id,token,source_update_id,step,question,options,repost_interval) VALUES (1,'old',3,'preview','Draft','["Yes","No"]',0);`);
+    sqlite.exec(readFileSync(new URL('../migrations/0009_poll_deadlines.sql',import.meta.url),'utf8'));
+    assert.equal(sqlite.prepare('SELECT result_message_id FROM polls WHERE id=1').get().result_message_id,44);
+    const open=sqlite.prepare('SELECT * FROM polls WHERE id=2').get();assert.equal(open.status,'open');assert.equal(open.ends_at,null);assert.equal(open.duration_days,0);
+    assert.equal(sqlite.prepare('SELECT duration_days FROM poll_drafts').get().duration_days,null);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM polls WHERE status='closed' AND closed_at IS NOT NULL AND result_message_id IS NULL").get().n,0);
+  }finally{sqlite.close();}
 });

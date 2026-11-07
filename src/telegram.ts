@@ -1,5 +1,12 @@
 import type { Button, Env } from './env.ts';
 
+export class TelegramError extends Error {
+  readonly reason:'not_found'|'cannot_delete'|'other';
+  constructor(method:string, status:number, reason:'not_found'|'cannot_delete'|'other') {
+    super(`Telegram ${method}: rejected (${status})`);
+    this.reason=reason;
+  }
+}
 export async function telegram<T = unknown>(env: Env, method: string, body: object): Promise<T> {
   // Never include the token, request body or Telegram description in logs/errors.
   let response: Response;
@@ -15,7 +22,11 @@ export async function telegram<T = unknown>(env: Env, method: string, body: obje
       data.description?.includes('message is not modified')) return data.result;
   if (method === 'answerCallbackQuery' && response.status === 400 &&
       (data.description?.includes('query is too old') || data.description?.includes('query ID is invalid'))) return data.result;
-  if (!response.ok || !data.ok) throw new Error(`Telegram ${method}: rejected (${response.status})`);
+  if (!response.ok || !data.ok) {
+    const description=data.description || '';
+    const reason=description.includes('message to delete not found') ? 'not_found' : description.includes("message can't be deleted") || description.includes('not enough rights to delete') ? 'cannot_delete' : 'other';
+    throw new TelegramError(method,response.status,reason);
+  }
   return data.result;
 }
 export function send(env: Env, chatId: number | string, text: string, buttons?: Button[][]) {

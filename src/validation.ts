@@ -1,9 +1,8 @@
 export function apartmentNumber(value: string): string | null {
-  // Canonical numeric IDs prevent apartments 01 and 1 from voting separately.
-  const clean = value.trim();
-  if (!/^\d{1,5}$/.test(clean)) return null;
-  const number = Number(clean);
-  return number > 0 ? String(number) : null;
+  const clean=value.normalize('NFKC').trim().toUpperCase();
+  const match=/^(\d{1,5})([AА]?)$/u.exec(clean);
+  if(!match||Number(match[1])<=0)return null;
+  return `${Number(match[1])}${match[2] ? 'А' : ''}`;
 }
 export function parsePoll(value: string) {
   const parts = value.split('|').map(v => v.trim());

@@ -1,3 +1,4 @@
+import { adminPollList, pollControlCallback, scheduledReposts } from './poll-reposting.ts';
 import { RESIDENT_ACTIONS, residentCallback, residentMenu, showOwnData, showOwnUnits, availablePolls, addUnit } from './resident-menu.ts';
 import { groupCallback, groupMembership, showGroups } from './groups.ts';
 import { ADMIN_ACTIONS, adminMenu, cancelPollWizard, requestPollWizard, pollWizardCallback, pollWizardMessage } from './poll-wizard.ts';
@@ -17,6 +18,7 @@ async function message(env: Env, m: Message, updateId: number) {
   if (command === '/id') return send(env, m.chat.id, `Ваш Telegram ID: ${m.from.id}`);
   const admin = String(m.from.id) === env.ADMIN_TELEGRAM_USER_ID;
   if (admin && (command === '/menu' || text === ADMIN_ACTIONS.menu)) return adminMenu(env);
+  if (admin && (text === ADMIN_ACTIONS.polls || command === '/polls')) return adminPollList(env);
   if (admin && text === ADMIN_ACTIONS.poll) return requestPollWizard(env, updateId);
   if (admin && text === ADMIN_ACTIONS.pending) return pendingRegistrations(env);
   if (admin && text === ADMIN_ACTIONS.groups) return showGroups(env);
@@ -56,6 +58,7 @@ export async function handleUpdate(env: Env, update: Update) {
   if (update.callback_query) {
     const q = update.callback_query;
     if (q.from.is_bot) return;
+    if (await pollControlCallback(env,q,update.update_id)) return;
     if (await privateVoteCallback(env, q)) return;
     if (await residentCallback(env, q)) return;
     if (await groupCallback(env, q, update.update_id)) return;
@@ -65,6 +68,9 @@ export async function handleUpdate(env: Env, update: Update) {
   } else if (update.message) await message(env, update.message, update.update_id);
 }
 export default {
+  async scheduled(_event:unknown,env:Env):Promise<void> {
+    await scheduledReposts(env);
+  },
   async fetch(request: Request, env: Env): Promise<Response> {
     const path = new URL(request.url).pathname;
     if (path === '/' && request.method === 'GET') return Response.json({ service: 'homebot', status: 'ok' });

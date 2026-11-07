@@ -1,3 +1,4 @@
+import { apartmentNumber } from './validation.ts';
 import type { Env } from './env.ts';
 
 export interface Premise {
@@ -12,8 +13,9 @@ export interface Membership extends Premise {
 export const membershipSelect = `SELECT p.*,m.id AS membership_id,m.user_id,m.role,m.status,m.version,
   m.application_token,m.details,u.name,u.phone FROM memberships m JOIN premises p ON p.id=m.premise_id JOIN profiles u ON u.user_id=m.user_id`;
 export function entranceForApartment(value: string): number | null {
-  if (!/^[1-9]\d{0,2}$/.test(value)) return null;
-  const n = Number(value);
+  const normalized=apartmentNumber(value);
+  if(!normalized)return null;
+  const n=Number.parseInt(normalized,10);
   return n <= 84 ? 1 : n <= 133 ? 2 : n <= 187 ? 3 : null;
 }
 export function commercialKey(name: string): string {

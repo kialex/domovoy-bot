@@ -3,328 +3,259 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, readdirSync } from 'node:fs';
 import worker from '../src/index.ts';
-import { apartmentNumber, parsePoll } from '../src/validation.ts';
+import { apartmentNumber, parsePoll, ukrainianPhone } from '../src/validation.ts';
+import { entranceForApartment, commercialNumber, validFloor } from '../src/premises.ts';
+import { pollCard } from '../src/presentation.ts';
 
-// Run the real migration and SQL against SQLite; mock only D1's transport and Telegram.
-function database(seedGroup = true) {
+function database(until = '9999') {
   const sqlite = new DatabaseSync(':memory:');
-  for (const file of readdirSync(new URL('../migrations/', import.meta.url)).filter(f => f.endsWith('.sql')).sort()) {
-    sqlite.exec(readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8'));
-  }
-  if (seedGroup) sqlite.exec("INSERT INTO groups(chat_id,title,status,bot_present,added_by,version,last_event_id) VALUES (-100123,'Test House','approved',1,1,1,1)");
+  for (const file of readdirSync(new URL('../migrations/',import.meta.url)).filter(f=>f.endsWith('.sql')&&f<until).sort()) sqlite.exec(readFileSync(new URL(`../migrations/${file}`,import.meta.url),'utf8'));
   const db = {
     prepare(sql) {
-      let values = [];
+      let values=[];
       return {
-        bind(...args) { values = args; return this; },
-        async run() {
-          const result = sqlite.prepare(sql).run(...values);
-          return { meta: { changes: Number(result.changes), last_row_id: Number(result.lastInsertRowid) } };
-        },
-        async first() { return sqlite.prepare(sql).get(...values) || null; },
-        async all() { return { results: sqlite.prepare(sql).all(...values) }; },
+        bind(...args){values=args;return this;},
+        async run(){const r=sqlite.prepare(sql).run(...values);return {meta:{changes:Number(r.changes),last_row_id:Number(r.lastInsertRowid)}};},
+        async first(){return sqlite.prepare(sql).get(...values)||null;},
+        async all(){return {results:sqlite.prepare(sql).all(...values)};},
       };
     },
-    async batch(statements) {
+    async batch(statements){
       sqlite.exec('BEGIN');
-      try { const result = []; for (const s of statements) result.push(await s.run()); sqlite.exec('COMMIT'); return result; }
-      catch (error) { sqlite.exec('ROLLBACK'); throw error; }
+      try{const result=[];for(const s of statements)result.push(await s.run());sqlite.exec('COMMIT');return result;}
+      catch(error){sqlite.exec('ROLLBACK');throw error;}
     },
   };
-  return { sqlite, db };
+  return {sqlite,db};
 }
-
-test('registration, approval, apartment vote uniqueness, retries and closing', async () => {
-  const { sqlite, db } = database();
-  const env = { HOME_DB: db, TELEGRAM_BOT_TOKEN: 'test', TELEGRAM_WEBHOOK_SECRET: 'secret', ADMIN_TELEGRAM_USER_ID: '1' };
-  const calls = [];
-  const originalFetch = globalThis.fetch;
-  let messageId = 100;
-  globalThis.fetch = async (url, init) => {
-    calls.push({ method: url.split('/').at(-1), ...JSON.parse(init.body) });
-    return Response.json({ ok: true, result: { username: 'HomeTestBot', message_id: ++messageId } });
+function harness(groups=1) {
+  const {sqlite,db}=database();
+  for(let i=1;i<=groups;i++)sqlite.prepare("INSERT INTO groups(chat_id,title,status,bot_present,added_by,version,last_event_id) VALUES (?,?,'approved',1,1,1,1)").run(-100000-i,`House ${i}`);
+  const env={HOME_DB:db,TELEGRAM_BOT_TOKEN:'test',TELEGRAM_WEBHOOK_SECRET:'secret',ADMIN_TELEGRAM_USER_ID:'1'};
+  const calls=[];let update=1000,message=9000;const oldFetch=globalThis.fetch;
+  const h={sqlite,env,calls,fail:null,lastUpdate:null,
+    async post(data,secret='secret') {return worker.fetch(new Request('https://home.test/telegram/webhook',{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Bot-Api-Secret-Token':secret},body:JSON.stringify(data)}),env);},
+    async dispatch(data){h.lastUpdate={update_id:++update,...data};const r=await h.post(h.lastUpdate);assert.equal(r.status,200,'Webhook must handle the test update');return h.lastUpdate;},
+    async msg(uid,text){return h.dispatch({message:{message_id:++message,chat:{id:uid,type:'private'},from:{id:uid},text}});},
+    async cb(uid,data,groupMessage){return h.dispatch({callback_query:{id:String(++message),from:{id:uid},data,message:groupMessage||{message_id:message,chat:{id:uid,type:'private'}}}});},
+    form(uid){return sqlite.prepare('SELECT * FROM sessions WHERE user_id=?').get(uid);},
+    member(uid,number,chat=-100001,kind='apartment'){return sqlite.prepare('SELECT m.*,p.number,p.chat_id,p.kind FROM memberships m JOIN premises p ON p.id=m.premise_id WHERE m.user_id=? AND p.number=? AND p.chat_id=? AND p.kind=?').get(uid,number,chat,kind);},
+    nextId(){return ++update;},close(){globalThis.fetch=oldFetch;sqlite.close();},
   };
-  let updateId = 0;
-  async function post(update, secret = 'secret') {
-    return worker.fetch(new Request('https://home.test/telegram/webhook', {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': secret },
-      body: JSON.stringify(update),
-    }), env);
-  }
-  async function message(uid, text, type = 'private') {
-    const update = { update_id: ++updateId, message: { message_id: updateId, from: { id: uid }, chat: { id: type === 'private' ? uid : -100123, type }, text } };
-    assert.equal((await post(update)).status, 200);
-    return update;
-  }
-  async function callback(uid, data, groupMessage) {
-    if (/^role:(owner|tenant)$/.test(data)) data += ':' + sqlite.prepare('SELECT token FROM sessions WHERE user_id=?').get(uid).token;
-    if (/^approve:\d+$/.test(data)) {
-      const target = Number(data.split(':')[1]);
-      const resident = sqlite.prepare('SELECT * FROM residents WHERE user_id=?').get(target);
-      data += `:${resident.chat_id}:${resident.application_token}`;
-    }
-    const update = { update_id: ++updateId, callback_query: { id: String(updateId), from: { id: uid }, data,
-      message: groupMessage || { message_id: 5, chat: { id: uid, type: 'private' } } } };
-    assert.equal((await post(update)).status, 200);
-    return update;
-  }
-  try {
-    assert.equal((await post({ update_id: 900 }, 'wrong')).status, 403);
-    assert.equal((await post({ update_id: 'bad' })).status, 400);
-    await message(2, '/start', 'supergroup');
-    assert.equal(calls.length, 0);
-    await message(2, '/poll Forbidden | Yes | No');
-    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM polls').get().n, 0);
-    for (const uid of [2, 3]) {
-      await message(uid, '/start'); await message(uid, `Resident ${uid}`); await message(uid, '001');
-      await callback(uid, 'role:owner');
-      assert.equal(sqlite.prepare('SELECT status FROM residents WHERE user_id=?').get(uid).status, 'pending');
-      await callback(3, `approve:${uid}`);
-      assert.equal(sqlite.prepare('SELECT status FROM residents WHERE user_id=?').get(uid).status, 'pending');
-      await callback(1, `approve:${uid}`);
-    }
-    const created = await message(1, '/poll Ремонт? | Так | Ні');
-    const count = calls.length;
-    await post(created);
-    assert.equal(calls.length, count, 'completed update must not send again');
-    const poll = sqlite.prepare('SELECT * FROM polls').get();
-    const group = { message_id: poll.message_id, chat: { id: -100123, type: 'supergroup' } };
-    await callback(9, `vote:${poll.id}:0`, group);
-    assert.equal(calls.at(-1).url, `https://t.me/HomeTestBot?start=poll_${poll.id}`);
-    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM votes').get().n, 0);
-    await callback(2, `vote:${poll.id}:99`, group);
-    await callback(2, `vote:${poll.id}:0`, { ...group, message_id: 99999 });
-    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM votes').get().n, 0);
-    await callback(2, `vote:${poll.id}:0`, group);
-    const live = calls.filter(c => c.method === 'editMessageText').at(-1);
-    assert.match(live.text, /Проголосувало квартир: 1/);
-    assert.equal(live.reply_markup.inline_keyboard[0][0].text, 'Так · 1');
-    assert.equal(live.reply_markup.inline_keyboard[1][0].text, 'Ні · 0');
-    await callback(3, `vote:${poll.id}:1`, group);
-    assert.equal(sqlite.prepare('SELECT option_index FROM votes').get().option_index, 0);
-    await callback(2, `vote:${poll.id}:1`, group);
-    assert.equal(sqlite.prepare('SELECT option_index FROM votes').get().option_index, 1);
-    await message(1, `/close ${poll.id}`);
-    await callback(2, `vote:${poll.id}:0`, group);
-    assert.equal(sqlite.prepare('SELECT option_index FROM votes').get().option_index, 1);
-    const edit = calls.filter(c => c.method === 'editMessageText').at(-1);
-    assert.deepEqual(edit.reply_markup.inline_keyboard, []);
-    assert.match(edit.text, /Ні: 1/);
-    assert.ok(calls.filter(c => c.method === 'sendMessage' && Number(c.chat_id) === -100123).every(c => !c.text.includes('Resident')));
-  } finally { globalThis.fetch = originalFetch; sqlite.close(); }
-});
-
-test('numeric apartment identities and poll validation', () => {
-  assert.equal(apartmentNumber(' 00042 '), '42');
-  for (const value of ['0', '42a', '-1', '1.5', '100000', '']) assert.equal(apartmentNumber(value), null);
-  assert.equal(parsePoll('Question | Same | Same'), null);
-  assert.equal(parsePoll('Question | Only'), null);
-  assert.deepEqual(parsePoll(' Question | Yes | No '), { question: 'Question', options: ['Yes', 'No'] });
-});
-
-test('Telegram failure returns retry status and releases update claim', async () => {
-  const { sqlite, db } = database();
-  const env = { HOME_DB: db, TELEGRAM_BOT_TOKEN: 'test', TELEGRAM_WEBHOOK_SECRET: 'secret', ADMIN_TELEGRAM_USER_ID: '1' };
-  const oldFetch = globalThis.fetch;
-  const update = { update_id: 77, message: { message_id: 1, from: { id: 1 }, chat: { id: 1, type: 'private' }, text: '/poll Тест | Так | Ні' } };
-  const request = () => new Request('https://home.test/telegram/webhook', { method: 'POST', headers: { 'X-Telegram-Bot-Api-Secret-Token': 'secret' }, body: JSON.stringify(update) });
-  try {
-    globalThis.fetch = async () => Response.json({ ok: false }, { status: 503 });
-    assert.equal((await worker.fetch(request(), env)).status, 503);
-    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM updates').get().n, 0);
-    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM polls').get().n, 1);
-    globalThis.fetch = async () => Response.json({ ok: true, result: { username: 'HomeTestBot', message_id: 123 } });
-    assert.equal((await worker.fetch(request(), env)).status, 200);
-    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM polls').get().n, 1);
-    assert.equal(sqlite.prepare('SELECT status FROM polls').get().status, 'open');
-    assert.equal(sqlite.prepare('SELECT state FROM updates').get().state, 'done');
-  } finally { globalThis.fetch = oldFetch; sqlite.close(); }
-});
-
-test('admin button wizard requires preview and confirmation; stale and foreign buttons cannot publish', async () => {
-  const { handleUpdate } = await import('../src/index.ts');
-  const { sqlite, db } = database();
-  const env = { HOME_DB: db, TELEGRAM_BOT_TOKEN: 'test', TELEGRAM_WEBHOOK_SECRET: 'secret', ADMIN_TELEGRAM_USER_ID: '1' };
-  const calls = [];
-  const oldFetch = globalThis.fetch;
-  let id = 1000;
-  globalThis.fetch = async (url, init) => {
-    calls.push({ method: url.split('/').at(-1), ...JSON.parse(init.body) });
-    return Response.json({ ok: true, result: { username: 'HomeTestBot', message_id: ++id } });
+  globalThis.fetch=async(url,init)=>{
+    const method=url.split('/').at(-1);calls.push({method,...JSON.parse(init.body)});
+    if(h.fail===method)return Response.json({ok:false},{status:503});
+    return Response.json({ok:true,result:{username:'HomeTestBot',message_id:++message}});
   };
-  const msg = (text) => handleUpdate(env, { update_id: ++id, message: { message_id: id, chat: { id: 1, type: 'private' }, from: { id: 1 }, text } });
-  const cb = (data, uid = 1, type = 'private') => handleUpdate(env, { update_id: ++id, callback_query: { id: String(id), from: { id: uid }, data, message: { message_id: 1, chat: { id: uid, type } } } });
-  const draft = () => sqlite.prepare('SELECT * FROM poll_drafts').get();
-  try {
-    await msg('/start');
-    assert.equal(calls.at(-1).reply_markup.inline_keyboard[0][0].callback_data, 'admin:newpoll');
-    await cb('admin:newpoll', 2);
-    assert.equal(draft(), undefined);
-    await cb('admin:newpoll', 1, 'supergroup');
-    assert.equal(draft(), undefined);
-    await cb('admin:newpoll');
-    const token = draft().token;
-    await cb(`draft:publish:${token}`);
-    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM polls').get().n, 0);
-    await msg('Ремонтуємо ліфт?');
-    await msg('Так');
-    await cb(`draft:preview:${token}`);
-    assert.equal(draft().step, 'options');
-    await msg('Так');
-    assert.equal(JSON.parse(draft().options).length, 1, 'duplicate option rejected');
-    await msg('Ні');
-    await cb(`draft:preview:${token}`);
-    assert.equal(draft().step, 'preview');
-    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM polls').get().n, 0, 'preview must not publish');
-    await cb(`draft:publish:${token}`, 2);
-    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM polls').get().n, 0);
-    await cb(`draft:publish:${token}`);
-    await cb(`draft:publish:${token}`);
-    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM polls').get().n, 1);
-    assert.equal(calls.filter(c => c.method === 'sendMessage' && Number(c.chat_id) === -100123).length, 1);
-    assert.equal(draft().step, 'published');
-    await cb('admin:newpoll');
-    const nextToken = draft().token;
-    await cb(`draft:cancel:${token}`);
-    assert.equal(draft().token, nextToken, 'old cancel must not delete new draft');
-    await cb(`draft:cancel:${nextToken}`);
-    assert.equal(draft(), undefined);
-    await cb(`draft:publish:${nextToken}`);
-    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM polls').get().n, 1);
-    await cb('admin:newpoll');
-    await msg('/cancel');
-    assert.equal(draft(), undefined);
-  } finally { globalThis.fetch = oldFetch; sqlite.close(); }
+  return h;
+}
+async function register(h,uid,{number='25',kind='apartment',floor='2',entrance='1',business='Coffee & Co',role='owner',chat=-100001,approve=true,phone='067 123 45 67'}={}) {
+  await h.msg(uid,`/register group_${Math.abs(chat)}`);
+  const token=h.form(uid).token;
+  await h.cb(uid,`reg:kind:${token}:${kind}`);
+  await h.msg(uid,number);
+  if(kind==='commercial'){await h.msg(uid,business);await h.msg(uid,entrance);}
+  await h.msg(uid,floor);await h.msg(uid,`Person ${uid}`);await h.msg(uid,phone);await h.cb(uid,`reg:role:${token}:${role}`);
+  assert.equal(h.form(uid).step,'review');
+  await h.cb(uid,`reg:submit:${token}`);
+  const m=h.member(uid,number,chat,kind);
+  assert.ok(m,'Application must be stored');
+  if(approve&&m.status==='pending')await h.cb(1,`review:approve:${m.id}:${m.application_token}`);
+  return h.member(uid,number,chat,kind);
+}
+async function poll(h,chat=-100001) {
+  await h.msg(1,'🗳 Створити голосування');
+  const d=h.sqlite.prepare('SELECT * FROM poll_drafts').get();assert.ok(d);
+  if(!d.chat_id){const g=h.sqlite.prepare('SELECT * FROM groups WHERE chat_id=?').get(chat);await h.cb(1,`draft:group:${d.token}:${chat}:${g.version}`);}
+  await h.msg(1,'Repair <lift> & entrance?');await h.msg(1,'Yes');await h.msg(1,'No');
+  await h.cb(1,`draft:preview:${d.token}`);await h.cb(1,`draft:publish:${d.token}`);
+  return h.sqlite.prepare('SELECT * FROM polls ORDER BY id DESC LIMIT 1').get();
+}
+const groupMessage=p=>({message_id:p.message_id,chat:{id:p.chat_id,type:'supergroup'}});
+async function cast(h,uid,p,option){await h.cb(uid,`vote:${p.id}:${option}`,groupMessage(p));}
+const currentVotes=h=>h.sqlite.prepare('SELECT * FROM premise_votes ORDER BY premise_id').all();
+
+test('house structure, commercial identities, phones and presentation validation',()=>{
+  for(const [n,e] of [['1',1],['84',1],['85',2],['133',2],['134',3],['187',3]])assert.equal(entranceForApartment(n),e);
+  for(const n of ['0','188','abc'])assert.equal(entranceForApartment(n),null);
+  assert.equal(apartmentNumber(' 00042 '),'42');
+  assert.equal(validFloor('apartment',1,'1'),null);assert.equal(validFloor('apartment',1,'14'),14);
+  assert.equal(validFloor('apartment',2,'0'),null);assert.equal(validFloor('apartment',2,'9'),9);assert.equal(validFloor('apartment',2,'10'),null);
+  assert.equal(validFloor('apartment',3,'10'),10);assert.equal(validFloor('commercial',2,'0'),0);assert.equal(validFloor('commercial',1,'1'),1);
+  assert.deepEqual(commercialNumber('007 – 008'),{number:'7-8',start:7,end:8});assert.equal(commercialNumber('8-7'),null);assert.equal(commercialNumber('7/8'),null);
+  for(const value of ['+380671234567','380671234567','067 123 45 67','+38 (067) 123-45-67'])assert.equal(ukrainianPhone(value),'+380671234567');
+  for(const value of ['', '+48123456789','+3800671234567','phone:0671234567','+380000000000'])assert.equal(ukrainianPhone(value),null);
+  assert.equal(parsePoll('Question | Same | Same'),null);
+  const html=pollCard(1,'<b>Question & answer</b>',['<Yes>','No'],new Map(),false);
+  assert.ok(html.includes('&lt;b&gt;Question &amp; answer&lt;/b&gt;'));assert.ok(html.includes('&lt;Yes&gt;'));assert.ok(!html.includes('NaN'));
 });
 
-test('multiple groups: connection requests, target selection, scoped registration, disconnect and rejoin', async () => {
-  const { handleUpdate } = await import('../src/index.ts');
-  const { sqlite, db } = database(false);
-  const env = { HOME_DB: db, TELEGRAM_BOT_TOKEN: 'test', TELEGRAM_WEBHOOK_SECRET: 'secret', ADMIN_TELEGRAM_USER_ID: '1' };
-  const calls = [];
-  const originalFetch = globalThis.fetch;
-  let id = 2000;
-  globalThis.fetch = async (url, init) => {
-    calls.push({ method: url.split('/').at(-1), ...JSON.parse(init.body) });
-    return Response.json({ ok: true, result: { username: 'HomeTestBot', message_id: ++id } });
-  };
-  const group = (chat) => sqlite.prepare('SELECT * FROM groups WHERE chat_id=?').get(chat);
-  const msg = (uid, text) => handleUpdate(env, { update_id: ++id, message: { message_id: id, chat: { id: uid, type: 'private' }, from: { id: uid }, text } });
-  const cb = (uid, data, message) => handleUpdate(env, { update_id: ++id, callback_query: { id: String(id), from: { id: uid }, data,
-    message: message || { message_id: 1, chat: { id: uid, type: 'private' } } } });
-  async function membership(chat, oldStatus, status, type = 'supergroup') {
-    const update = { update_id: ++id, my_chat_member: { chat: { id: chat, title: `House ${chat}`, type }, from: { id: 6 }, old_chat_member: { status: oldStatus }, new_chat_member: { status } } };
-    await handleUpdate(env, update); return update;
-  }
-  async function register(uid, pollId, approve = true) {
-    await msg(uid, `/start poll_${pollId}`); await msg(uid, `Person ${uid}`); await msg(uid, '7');
-    const session = sqlite.prepare('SELECT * FROM sessions WHERE user_id=?').get(uid);
-    await cb(uid, `role:owner:${session.token}`);
-    if (approve) {
-      const r = sqlite.prepare('SELECT * FROM residents WHERE user_id=? AND chat_id=?').get(uid, session.chat_id);
-      await cb(1, `approve:${uid}:${r.chat_id}:${r.application_token}`);
-    }
-    return session;
-  }
-  const voteMessage = p => ({ message_id: p.message_id, chat: { id: p.chat_id, type: 'supergroup' } });
-  try {
-    await membership(-100111, 'left', 'member');
-    const firstRequest = group(-100111).version;
-    assert.equal(group(-100111).status, 'pending');
-    assert.equal(calls.filter(c => c.method === 'sendMessage').every(c => String(c.chat_id) === '1'), true, 'connection request is private');
-    await cb(2, `group:approve:-100111:${firstRequest}`);
-    assert.equal(group(-100111).status, 'pending');
-    await cb(1, `group:approve:-100111:${firstRequest}`);
-    await membership(-100222, 'left', 'administrator');
-    await cb(1, `group:approve:-100222:${group(-100222).version}`);
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM groups WHERE status='approved'").get().n, 2);
-    await membership(-100999, 'left', 'administrator', 'channel');
-    assert.equal(group(-100999), undefined, 'channels are not registered as residential groups');
-    await cb(1, 'admin:newpoll');
-    const draft = sqlite.prepare('SELECT * FROM poll_drafts').get();
-    assert.equal(draft.chat_id, null);
-    await msg(1, 'Not a question until a group is selected');
-    assert.equal(sqlite.prepare('SELECT question FROM poll_drafts').get().question, null);
-    await cb(1, `draft:group:${draft.token}:-100222:${group(-100222).version}`);
-    await msg(1, 'Question for second house'); await msg(1, 'Yes'); await msg(1, 'No');
-    await cb(1, `draft:preview:${draft.token}`);
-    assert.match(calls.at(-1).text, /House -100222/);
-    await cb(1, `draft:publish:${draft.token}`);
-    const p2 = sqlite.prepare('SELECT * FROM polls').get();
-    assert.equal(p2.chat_id, -100222);
-    assert.equal(calls.filter(c => c.method === 'sendMessage' && c.chat_id === -100111).length, 0);
-    // Build another poll through the same real wizard, now for the first house.
-    await cb(1, 'admin:newpoll');
-    const d1 = sqlite.prepare('SELECT * FROM poll_drafts').get();
-    await cb(1, `draft:group:${d1.token}:-100111:${group(-100111).version}`);
-    await msg(1, 'Question for first house'); await msg(1, 'Yes'); await msg(1, 'No');
-    await cb(1, `draft:preview:${d1.token}`); await cb(1, `draft:publish:${d1.token}`);
-    const p1 = sqlite.prepare('SELECT * FROM polls WHERE chat_id=-100111').get();
-    await register(2, p1.id);
-    await cb(2, `vote:${p2.id}:0`, voteMessage(p2));
-    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM votes').get().n, 0, 'approval in first house gives no vote in second');
-    await cb(2, `vote:${p1.id}:0`, voteMessage(p1));
-    await register(2, p2.id);
-    await cb(2, `vote:${p2.id}:1`, voteMessage(p2));
-    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM residents WHERE user_id=2').get().n, 2);
-    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM votes').get().n, 2, 'same apartment number votes independently in each group');
-    // Admin deep links must start registration, even while a poll draft exists.
-    await cb(1, 'admin:newpoll');
-    const adminDraft = sqlite.prepare('SELECT * FROM poll_drafts').get();
-    await register(1, p2.id);
-    assert.equal(sqlite.prepare('SELECT status FROM residents WHERE user_id=1 AND chat_id=-100222').get().status, 'approved');
-    assert.equal(sqlite.prepare('SELECT token FROM poll_drafts').get().token, adminDraft.token);
-    assert.equal(sqlite.prepare('SELECT question FROM poll_drafts').get().question, null);
-    await msg(1, '/cancel');
-    // An old role button cannot submit an in-progress application for a different house.
-    await msg(3, `/start poll_${p1.id}`); await msg(3, 'Third Person'); await msg(3, '8');
-    const oldToken = sqlite.prepare('SELECT token FROM sessions WHERE user_id=3').get().token;
-    await msg(3, `/start poll_${p2.id}`); await msg(3, 'Third Person'); await msg(3, '9');
-    await cb(3, `role:owner:${oldToken}`);
-    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM residents WHERE user_id=3').get().n, 0);
-    // Disconnect closes just this group's polls and disables their old vote buttons.
-    const connectedVersion = group(-100111).version;
-    await cb(1, `group:askdisconnect:-100111:${connectedVersion}`);
-    assert.equal(group(-100111).status, 'approved', 'first button only asks for confirmation');
-    await cb(1, `group:disconnect:-100111:${connectedVersion}`);
-    assert.equal(group(-100111).status, 'disconnected');
-    assert.equal(group(-100222).status, 'approved');
-    assert.equal(sqlite.prepare('SELECT status FROM polls WHERE id=?').get(p1.id).status, 'closed');
-    assert.equal(sqlite.prepare('SELECT status FROM polls WHERE id=?').get(p2.id).status, 'open');
-    await cb(2, `vote:${p1.id}:1`, voteMessage(p1));
-    assert.equal(sqlite.prepare('SELECT option_index FROM votes WHERE poll_id=?').get(p1.id).option_index, 0);
-    await cb(1, `group:approve:-100111:${firstRequest}`);
-    assert.equal(group(-100111).status, 'disconnected', 'stale approval cannot reconnect');
-    await cb(1, `group:approve:-100111:${group(-100111).version}`);
-    assert.equal(group(-100111).status, 'approved');
-    assert.equal(sqlite.prepare('SELECT status FROM polls WHERE id=?').get(p1.id).status, 'closed', 'reconnect does not reopen old polls');
-    await membership(-100222, 'administrator', 'kicked');
-    assert.equal(group(-100222).status, 'removed');
-    assert.equal(sqlite.prepare('SELECT status FROM polls WHERE id=?').get(p2.id).status, 'closed');
-    const rejoin = await membership(-100222, 'kicked', 'member');
-    assert.equal(group(-100222).status, 'pending');
-    await handleUpdate(env, rejoin);
-    assert.equal(group(-100222).status, 'pending');
-    await cb(1, `group:approve:-100222:${group(-100222).version}`);
-    assert.equal(group(-100222).status, 'approved');
-  } finally { globalThis.fetch = originalFetch; sqlite.close(); }
+test('private registration: preview, invalid floor/phone, back, restart, consent and required fields',async()=>{
+  const h=harness();try{
+    await h.msg(2,'/start');let s=h.form(2);assert.equal(s.step,'kind');
+    await h.cb(2,`reg:submit:${s.token}`);assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM profiles').get().n,0);
+    await h.cb(2,`reg:kind:${s.token}:apartment`);await h.msg(2,'188');assert.equal(h.form(2).step,'number');
+    await h.msg(2,'85');assert.equal(JSON.parse(h.form(2).data).entrance,2);
+    await h.msg(2,'0');assert.equal(h.form(2).step,'floor');await h.msg(2,'9');await h.msg(2,'Olena Koval');
+    await h.msg(2,'+48123456789');assert.equal(h.form(2).step,'phone');await h.msg(2,'067 123 45 67');
+    await h.cb(2,`reg:role:${s.token}:tenant`);assert.equal(h.form(2).step,'review');
+    assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM memberships').get().n,0);
+    assert.equal(h.calls.some(c=>c.method==='sendMessage'&&String(c.chat_id)==='1'),false,'no private data reaches admin before Submit');
+    await h.cb(3,`reg:submit:${s.token}`);assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM memberships').get().n,0);
+    await h.cb(2,`reg:back:${s.token}`);assert.equal(h.form(2).step,'role');await h.cb(2,`reg:role:${s.token}:owner`);
+    await h.cb(2,`reg:restart:${s.token}`);assert.notEqual(h.form(2).token,s.token);
+    const fresh=h.form(2).token;await h.cb(2,`reg:cancel:${s.token}`);assert.equal(h.form(2).token,fresh);
+    await h.cb(2,`reg:cancel:${fresh}`);assert.equal(h.form(2),undefined);
+    const m=await register(h,2,{number:'85',floor:'9',approve:false});assert.equal(m.status,'pending');
+    await h.cb(3,`review:approve:${m.id}:${m.application_token}`);assert.equal(h.member(2,'85').status,'pending');
+    await h.cb(1,`review:approve:${m.id}:${m.application_token}`);assert.equal(h.member(2,'85').status,'approved');
+    assert.equal(h.sqlite.prepare('SELECT phone FROM profiles WHERE user_id=2').get().phone,'+380671234567');
+    await register(h,2,{number:'85',floor:'9',role:'tenant'});assert.equal(h.member(2,'85').role,'owner','duplicate form cannot downgrade approved membership');
+  }finally{h.close();}
 });
 
-test('multi-group migration preserves old residents, votes and history without enabling a group', () => {
-  const sqlite = new DatabaseSync(':memory:');
-  try {
-    for (const file of ['0001_homebot.sql', '0002_poll_drafts.sql']) sqlite.exec(readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8'));
-    sqlite.exec(`INSERT INTO residents(user_id,name,apartment,role,status) VALUES (2,'Existing resident','12','owner','approved');
-      INSERT INTO polls(source_update_id,question,options,chat_id,status,created_by) VALUES (1,'Existing poll','["Yes","No"]',-100777,'open',1);
-      INSERT INTO votes(poll_id,apartment,user_id,option_index) VALUES (1,'12',2,1);`);
-    sqlite.exec(readFileSync(new URL('../migrations/0003_multiple_groups.sql', import.meta.url), 'utf8'));
-    const resident = sqlite.prepare('SELECT * FROM residents').get();
-    assert.equal(resident.chat_id, -100777);
-    assert.equal(resident.status, 'approved');
-    assert.equal(resident.application_token.length, 8);
-    assert.equal(sqlite.prepare('SELECT option_index FROM votes').get().option_index, 1);
-    assert.equal(sqlite.prepare('SELECT status FROM polls').get().status, 'closed');
-    assert.equal(sqlite.prepare('SELECT status FROM groups').get().status, 'disconnected');
-    assert.equal(sqlite.prepare('PRAGMA foreign_key_check').all().length, 0);
-  } finally { sqlite.close(); }
+test('commercial registration uses one canonical range, permits ground floor and prevents overlapping approved units',async()=>{
+  const h=harness();try{
+    const first=await register(h,2,{kind:'commercial',number:'7-8',entrance:'2',floor:'0'});assert.equal(first.status,'approved');
+    const unit=h.sqlite.prepare('SELECT * FROM premises WHERE id=?').get(first.premise_id);
+    assert.equal(unit.number,'7-8');assert.equal(unit.floor,0);assert.equal(unit.business_name,'Coffee & Co');
+    const second=await register(h,3,{kind:'commercial',number:'8',entrance:'2',floor:'0'});
+    assert.equal(second.status,'pending','overlapping range must not receive second voting entitlement');
+    const third=await register(h,4,{kind:'commercial',number:'10-12',entrance:'3',floor:'0'});assert.equal(third.status,'approved');
+  }finally{h.close();}
+});
+
+test('one premise vote stays in group, live counts update, other resident cannot overwrite, closing freezes results',async()=>{
+  const h=harness();try{
+    await register(h,2);await register(h,3,{role:'tenant'});const p=await poll(h);
+    const published=h.calls.find(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id);
+    assert.equal(published.reply_markup.inline_keyboard.length,2);assert.ok(published.reply_markup.inline_keyboard.flat().every(b=>b.callback_data&&!b.url));
+    await cast(h,9,p,0);assert.equal(currentVotes(h).length,0);assert.equal(h.calls.at(-1).url,`https://t.me/HomeTestBot?start=poll_${p.id}`);
+    await h.cb(2,`vote:${p.id}:0`,{...groupMessage(p),message_id:99999});assert.equal(currentVotes(h).length,0);
+    await cast(h,2,p,0);assert.equal(currentVotes(h).length,1);
+    const live=h.calls.filter(c=>c.method==='editMessageText').at(-1);assert.match(live.text,/100%/);assert.equal(live.reply_markup.inline_keyboard[0][0].text,'Yes · 1');
+    assert.ok(!live.text.includes('Person'));await cast(h,3,p,1);assert.equal(currentVotes(h)[0].option_index,0);
+    await cast(h,2,p,1);assert.equal(currentVotes(h)[0].option_index,1);
+    await h.msg(1,`/close ${p.id}`);await cast(h,2,p,0);assert.equal(currentVotes(h)[0].option_index,1);
+    assert.deepEqual(h.calls.filter(c=>c.method==='editMessageText').at(-1).reply_markup.inline_keyboard,[]);
+  }finally{h.close();}
+});
+
+test('multiple premises: private intent is user-bound, individual choices differ and all-vote requires confirmation',async()=>{
+  const h=harness();try{
+    const a=await register(h,2,{number:'25'});const b=await register(h,2,{number:'26'});
+    await register(h,3,{number:'26',role:'tenant'});const p=await poll(h);
+    await cast(h,2,p,0);assert.equal(currentVotes(h).length,0,'group click must not cast for an arbitrary unit');
+    let intent=h.sqlite.prepare('SELECT * FROM vote_intents WHERE user_id=2').get();assert.ok(h.calls.at(-1).url.endsWith(`vote_${intent.token}`));
+    await h.msg(2,`/start vote_${intent.token}`);assert.match(h.calls.at(-1).text,/Від якого приміщення/);
+    await h.cb(3,`cast:${intent.token}:${a.premise_id}`);assert.equal(currentVotes(h).length,0);
+    await h.cb(2,`cast:${intent.token}:${a.premise_id}`);assert.equal(currentVotes(h)[0].option_index,0);
+    await cast(h,2,p,1);const next=h.sqlite.prepare('SELECT * FROM vote_intents WHERE user_id=2').get();assert.notEqual(next.token,intent.token);
+    await h.cb(2,`cast:${intent.token}:${b.premise_id}`);assert.equal(currentVotes(h).length,1,'old choice token invalidated');
+    await h.cb(2,`cast:${next.token}:${b.premise_id}`);assert.deepEqual(currentVotes(h).map(v=>v.option_index),[0,1]);
+    await h.cb(2,`va:confirm:${next.token}`);assert.deepEqual(currentVotes(h).map(v=>v.option_index),[0,1],'bulk vote requires confirmation screen first');
+    await h.cb(2,`va:ask:${next.token}`);assert.deepEqual(currentVotes(h).map(v=>v.option_index),[0,1]);
+    await h.cb(2,`va:confirm:${next.token}`);assert.deepEqual(currentVotes(h).map(v=>v.option_index),[1,1]);
+    h.sqlite.prepare('UPDATE vote_intents SET expires_at=0 WHERE token=?').run(next.token);
+    await h.cb(2,`cast:${next.token}:${a.premise_id}`);assert.deepEqual(currentVotes(h).map(v=>v.option_index),[1,1]);
+    await cast(h,2,p,0);intent=h.sqlite.prepare('SELECT * FROM vote_intents WHERE user_id=2').get();
+    await h.msg(1,`/close ${p.id}`);await h.cb(2,`va:confirm:${intent.token}`);assert.deepEqual(currentVotes(h).map(v=>v.option_index),[1,1]);
+  }finally{h.close();}
+});
+
+test('owners can revoke tenants only in their own premise; pending/foreign owners cannot; closed history remains',async()=>{
+  const h=harness();try{
+    const owner=await register(h,2);const tenant=await register(h,3,{role:'tenant'});const otherOwner=await register(h,4);
+    await register(h,3,{number:'26',role:'owner'});await register(h,5,{number:'26',role:'owner'});
+    const pending=await register(h,6,{approve:false});const p=await poll(h);
+    await cast(h,3,p,0);let i=h.sqlite.prepare('SELECT * FROM vote_intents WHERE user_id=3').get();
+    await h.cb(3,`cast:${i.token}:${tenant.premise_id}`);assert.equal(currentVotes(h).length,1);
+    await h.cb(3,`unit:members:${tenant.premise_id}:0`);
+    const listing=h.calls.at(-1);assert.ok(!listing.text.includes('+380'),'members cannot see other residents phones');
+    await h.cb(6,`unit:members:${pending.premise_id}:0`);assert.match(h.calls.at(-1).text,/після підтвердження/);
+    for(const uid of [3,5,6])await h.cb(uid,`unit:remove:${tenant.id}:${tenant.version}`);
+    assert.equal(h.member(3,'25').status,'approved');
+    await h.cb(2,`unit:remove:${otherOwner.id}:${otherOwner.version}`);assert.equal(h.member(4,'25').status,'approved');
+    await h.cb(2,`unit:askremove:${tenant.id}:${tenant.version}`);assert.equal(h.member(3,'25').status,'approved','confirmation is separate');
+    await h.cb(2,`unit:remove:${tenant.id}:${tenant.version}`);assert.equal(h.member(3,'25').status,'revoked');assert.equal(h.member(3,'26').status,'approved');
+    assert.equal(currentVotes(h).length,0,'open votes from revoked membership removed');
+    await h.cb(2,`unit:remove:${tenant.id}:${tenant.version}`);assert.equal(h.sqlite.prepare("SELECT COUNT(*) AS n FROM membership_audit WHERE action='revoke'").get().n,1);
+    await cast(h,2,p,1);await h.msg(1,`/close ${p.id}`);
+    await h.cb(1,`unit:remove:${owner.id}:${owner.version}`);assert.equal(currentVotes(h).length,1,'closed tally is historical');
+  }finally{h.close();}
+});
+
+test('group isolation, multiple connections, stale connection buttons and disconnect',async()=>{
+  const h=harness(2);try{
+    await register(h,2);const p2=await poll(h,-100002);await cast(h,2,p2,0);assert.equal(currentVotes(h).length,0);
+    await register(h,2,{chat:-100002});await cast(h,2,p2,0);assert.equal(currentVotes(h).length,1);
+    await h.cb(1,'admin:groups');assert.match(h.calls.at(-1).text,/Групи/);
+    await h.cb(2,'group:disconnect:-100002:1');assert.equal(h.sqlite.prepare('SELECT status FROM groups WHERE chat_id=-100002').get().status,'approved');
+    await h.cb(1,'group:askdisconnect:-100002:1');assert.equal(h.sqlite.prepare('SELECT status FROM groups WHERE chat_id=-100002').get().status,'approved');
+    await h.cb(1,'group:disconnect:-100002:1');assert.equal(h.sqlite.prepare('SELECT status FROM groups WHERE chat_id=-100002').get().status,'disconnected');
+    assert.equal(h.sqlite.prepare('SELECT status FROM groups WHERE chat_id=-100001').get().status,'approved');
+    assert.equal(h.sqlite.prepare('SELECT status FROM polls WHERE id=?').get(p2.id).status,'closed');
+    await h.cb(1,'group:approve:-100002:1');assert.equal(h.sqlite.prepare('SELECT status FROM groups WHERE chat_id=-100002').get().status,'disconnected');
+    const version=h.sqlite.prepare('SELECT version FROM groups WHERE chat_id=-100002').get().version;
+    await h.cb(1,`group:approve:-100002:${version}`);assert.equal(h.sqlite.prepare('SELECT status FROM groups WHERE chat_id=-100002').get().status,'approved');
+    assert.equal(h.sqlite.prepare('SELECT status FROM polls WHERE id=?').get(p2.id).status,'closed');
+  }finally{h.close();}
+});
+
+test('admin and resident keyboards route actions without poll/registration input corruption',async()=>{
+  const h=harness();try{
+    await h.msg(1,'/start');assert.ok(h.calls.at(-1).reply_markup.keyboard);assert.equal(h.calls.at(-1).reply_markup.is_persistent,true);
+    assert.ok(h.calls.some(c=>c.method==='setChatMenuButton'&&c.chat_id===1));
+    await h.msg(1,'🗳 Створити голосування');const token=h.sqlite.prepare('SELECT token FROM poll_drafts').get().token;
+    await h.msg(1,'🗳 Створити голосування');assert.equal(h.sqlite.prepare('SELECT token FROM poll_drafts').get().token,token);
+    await h.msg(1,'/cancel');
+    await register(h,1);await h.msg(1,'👤 Мої дані');assert.match(h.calls.at(-1).text,/Person 1/);
+    await register(h,2);await h.msg(2,'/start');assert.ok(h.calls.at(-1).reply_markup.keyboard);
+    await h.msg(2,'🏠 Мої приміщення');assert.match(h.calls.at(-1).text,/Мої приміщення/);
+    await h.msg(2,'➕ Додати приміщення');assert.equal(h.form(2).step,'kind');
+    await h.msg(2,'👤 Мої дані');assert.equal(h.form(2).step,'kind','menu text cannot become a field value');
+    await h.msg(2,'/poll Unauthorized | Yes | No');assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM polls').get().n,0);
+  }finally{h.close();}
+});
+
+test('webhook secret, invalid payload, idempotency and Telegram failure retries',async()=>{
+  const h=harness();try{
+    assert.equal((await h.post({update_id:1},'wrong')).status,403);
+    assert.equal((await h.post({update_id:'bad'})).status,400);
+    await h.dispatch({message:{message_id:1,chat:{id:-100001,type:'supergroup'},from:{id:2},text:'/start'}});assert.equal(h.calls.length,0);
+    await h.msg(1,'/start');const update=h.lastUpdate;const before=h.calls.length;await h.post(update);assert.equal(h.calls.length,before);
+    const request={update_id:h.nextId(),message:{message_id:1,chat:{id:1,type:'private'},from:{id:1},text:'/poll Retry | Yes | No'}};
+    h.fail='sendMessage';assert.equal((await h.post(request)).status,503);assert.equal(h.sqlite.prepare('SELECT state FROM updates WHERE id=?').get(request.update_id),undefined);
+    h.fail=null;assert.equal((await h.post(request)).status,200);assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM polls').get().n,1);
+  }finally{h.close();}
+});
+
+test('migration preserves old people, memberships, votes and in-progress legacy forms',()=>{
+  const {sqlite}=database('0006');try{
+    sqlite.exec(`INSERT INTO groups(chat_id,title,status,bot_present,added_by,version,last_event_id) VALUES (-100001,'House','approved',1,1,1,1);
+      INSERT INTO residents(user_id,chat_id,name,apartment,role,status,phone,application_token) VALUES (2,-100001,'Old resident','25','owner','approved','+380671234567','old');
+      INSERT INTO polls(source_update_id,question,options,chat_id,status,created_by) VALUES (1,'Old poll','["Yes","No"]',-100001,'open',1);
+      INSERT INTO votes(poll_id,apartment,user_id,option_index) VALUES (1,'25',2,1);
+      INSERT INTO sessions(user_id,step,chat_id,token) VALUES (3,'phone',-100001,'old-form');`);
+    sqlite.exec(readFileSync(new URL('../migrations/0006_premises.sql',import.meta.url),'utf8'));
+    assert.equal(sqlite.prepare('SELECT name FROM profiles').get().name,'Old resident');
+    assert.equal(sqlite.prepare('SELECT status FROM memberships').get().status,'approved');
+    assert.equal(sqlite.prepare('SELECT option_index FROM premise_votes').get().option_index,1);
+    assert.equal(sqlite.prepare('SELECT token FROM legacy_registration_sessions').get().token,'old-form');
+    assert.equal(sqlite.prepare('PRAGMA foreign_key_check').all().length,0);
+  }finally{sqlite.close();}
+});
+
+test('revoked membership and newly approved units cannot expand an already confirmed bulk selection',async()=>{
+  const h=harness();try{
+    const a=await register(h,2,{number:'25'});const b=await register(h,2,{number:'26'});const p=await poll(h);
+    await cast(h,2,p,0);const intent=h.sqlite.prepare('SELECT * FROM vote_intents').get();
+    await h.cb(2,`va:ask:${intent.token}`);
+    const c=await register(h,2,{number:'27'});
+    h.sqlite.prepare("UPDATE memberships SET status='revoked',version=version+1 WHERE id=?").run(b.id);
+    await h.cb(2,`cast:${intent.token}:${b.premise_id}`);assert.equal(currentVotes(h).length,0);
+    await h.cb(2,`va:confirm:${intent.token}`);
+    assert.deepEqual(currentVotes(h).map(v=>v.premise_id),[a.premise_id]);
+    assert.ok(!currentVotes(h).some(v=>v.premise_id===c.premise_id),'a new unit must not be silently added to prior confirmation');
+  }finally{h.close();}
 });

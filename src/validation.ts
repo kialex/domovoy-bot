@@ -17,3 +17,10 @@ export function positiveId(value: string | undefined): number | null {
   const n = Number(value);
   return Number.isSafeInteger(n) ? n : null;
 }
+
+export function ukrainianPhone(value: string): string | null {
+  // Accept usual display formatting, but never discard letters or other content.
+  const compact = value.trim().replace(/[\s()\-]/g, '');
+  const match = /^(?:\+380|380|0)([1-9]\d{8})$/.exec(compact);
+  return match ? `+380${match[1]}` : null;
+}

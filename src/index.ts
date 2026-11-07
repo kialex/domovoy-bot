@@ -1,7 +1,8 @@
-import { groupCallback, groupMembership } from './groups.ts';
-import { adminMenu, cancelPollWizard, pollWizardCallback, pollWizardMessage, startPollWizard } from './poll-wizard.ts';
+import { RESIDENT_ACTIONS, residentCallback, residentMenu, showOwnData, showOwnUnits, availablePolls, addUnit } from './resident-menu.ts';
+import { groupCallback, groupMembership, showGroups } from './groups.ts';
+import { ADMIN_ACTIONS, adminMenu, cancelPollWizard, requestPollWizard, pollWizardCallback, pollWizardMessage } from './poll-wizard.ts';
 import type { Env, Message, Update } from './env.ts';
-import { createPoll, pollResults, vote } from './polls.ts';
+import { createPoll, pollResults, vote, openVoteIntent, privateVoteCallback } from './polls.ts';
 import { pendingRegistrations, registrationCallback, registrationMessage, startRegistration } from './registration.ts';
 import { send } from './telegram.ts';
 import { positiveId } from './validation.ts';
@@ -12,19 +13,34 @@ async function message(env: Env, m: Message, updateId: number) {
   const text = m.text?.trim() || '';
   const [raw, ...args] = text.split(/\s+/);
   const command = raw.split('@')[0];
+  if (command === '/start' && args[0]?.startsWith('vote_')) return openVoteIntent(env, m.from.id, args[0].slice(5));
   if (command === '/id') return send(env, m.chat.id, `Ваш Telegram ID: ${m.from.id}`);
   const admin = String(m.from.id) === env.ADMIN_TELEGRAM_USER_ID;
+  if (admin && (command === '/menu' || text === ADMIN_ACTIONS.menu)) return adminMenu(env);
+  if (admin && text === ADMIN_ACTIONS.poll) return requestPollWizard(env, updateId);
+  if (admin && text === ADMIN_ACTIONS.pending) return pendingRegistrations(env);
+  if (admin && text === ADMIN_ACTIONS.groups) return showGroups(env);
+  if (text === RESIDENT_ACTIONS.data) return showOwnData(env, m.from.id);
+  if (text === RESIDENT_ACTIONS.units) return showOwnUnits(env, m.from.id);
+  if (text === RESIDENT_ACTIONS.polls) return availablePolls(env, m.from.id);
+  if (text === RESIDENT_ACTIONS.add) return addUnit(env, m.from.id);
+  if (text === RESIDENT_ACTIONS.menu || (!admin && command === '/menu')) return residentMenu(env, m.from.id);
   if (command === '/start' && admin && !args[0]) return adminMenu(env);
+  if (command === '/start' && !args[0]) {
+    const profile = await env.HOME_DB.prepare('SELECT user_id FROM profiles WHERE user_id=?').bind(m.from.id).first();
+    if (profile) return residentMenu(env, m.from.id);
+  }
   if (command === '/start' || command === '/register') return startRegistration(env, m.from.id, args[0]);
-  if (command === '/cancel') {
+  if (command === '/cancel' || (admin && text === ADMIN_ACTIONS.cancel)) {
     if (admin) await cancelPollWizard(env);
     await env.HOME_DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(m.from.id).run();
-    return send(env, m.chat.id, 'Заповнення скасовано. /start — відкрити меню.');
+    if (admin) return adminMenu(env);
+    return residentMenu(env, m.from.id);
   }
   if (['/poll', '/pending', '/results', '/close'].includes(command)) {
     if (!admin) return send(env, m.chat.id, 'Ця команда доступна лише адміністратору.');
     if (command === '/pending') return pendingRegistrations(env);
-    if (command === '/poll') return args.length ? createPoll(env, args.join(' '), updateId) : startPollWizard(env, updateId);
+    if (command === '/poll') return args.length ? createPoll(env, args.join(' '), updateId) : requestPollWizard(env, updateId);
     const id = positiveId(args[0]);
     if (!id) return send(env, m.chat.id, `Формат: ${command} номер_голосування`);
     return pollResults(env, id, command === '/close');
@@ -40,6 +56,8 @@ export async function handleUpdate(env: Env, update: Update) {
   if (update.callback_query) {
     const q = update.callback_query;
     if (q.from.is_bot) return;
+    if (await privateVoteCallback(env, q)) return;
+    if (await residentCallback(env, q)) return;
     if (await groupCallback(env, q, update.update_id)) return;
     if (await pollWizardCallback(env, q, update.update_id)) return;
     if (q.data?.startsWith('vote:')) return vote(env, q);

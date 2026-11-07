@@ -13,6 +13,8 @@ export async function telegram<T = unknown>(env: Env, method: string, body: obje
   // Repeated close/retry may render exactly the same final message.
   if (method === 'editMessageText' && response.status === 400 &&
       data.description?.includes('message is not modified')) return data.result;
+  if (method === 'answerCallbackQuery' && response.status === 400 &&
+      (data.description?.includes('query is too old') || data.description?.includes('query ID is invalid'))) return data.result;
   if (!response.ok || !data.ok) throw new Error(`Telegram ${method}: rejected (${response.status})`);
   return data.result;
 }
@@ -22,16 +24,26 @@ export function send(env: Env, chatId: number | string, text: string, buttons?: 
     ...(buttons ? { reply_markup: { inline_keyboard: buttons } } : {}),
   });
 }
+export function sendHtml(env: Env, chatId: number | string, text: string, buttons?: Button[][]) {
+  return telegram<{ message_id: number }>(env, 'sendMessage', {
+    chat_id: chatId, text, parse_mode: 'HTML',
+    ...(buttons ? { reply_markup: { inline_keyboard: buttons } } : {}),
+  });
+}
 export function answer(env: Env, id: string, text: string, url?: string) {
   return telegram(env, 'answerCallbackQuery', {
     callback_query_id: id, text, cache_time: 0,
     ...(url ? { url } : { show_alert: true }),
   });
 }
-export async function registrationUrl(env: Env, pollId?: number) {
+export async function botStartUrl(env: Env, payload: string) {
   const bot = await telegram<{ username?: string }>(env, 'getMe', {});
   if (!bot.username || !/^[a-zA-Z0-9_]{5,32}$/.test(bot.username)) {
     throw new Error('Telegram getMe: missing or invalid bot username');
   }
-  return `https://t.me/${bot.username}?start=${pollId ? `poll_${pollId}` : 'register'}`;
+  return `https://t.me/${bot.username}?start=${encodeURIComponent(payload)}`;
+}
+
+export function registrationUrl(env: Env, pollId?: number) {
+  return botStartUrl(env, pollId ? `poll_${pollId}` : 'register');
 }

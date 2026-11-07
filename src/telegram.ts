@@ -8,6 +8,10 @@ export class TelegramError extends Error {
   }
 }
 export async function telegram<T = unknown>(env: Env, method: string, body: object): Promise<T> {
+  if(method==='sendMessage'){
+    const target=body as {chat_id?:number|string};const uid=Number(target.chat_id);
+    if(Number.isSafeInteger(uid)&&uid>0){const chat=await env.HOME_DB.prepare('SELECT chat_id FROM private_chats WHERE user_id=?').bind(uid).first<{chat_id:number}>();if(chat)body={...body,chat_id:chat.chat_id};}
+  }
   // Never include the token, request body or Telegram description in logs/errors.
   let response: Response;
   try {

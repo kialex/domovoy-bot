@@ -710,3 +710,84 @@ test('directory protects foreign contacts, isolates houses, paginates and reject
   await h.cb(1,`directory:person:${b.id}`);assert.equal(h.calls.at(-1).text,'Мешканець недоступний.');
  }finally{h.close();}
 });
+
+async function requestJoin(h,uid,chat=-100001,privateChat=uid){
+ await h.dispatch({chat_join_request:{chat:{id:chat,type:'supergroup'},from:{id:uid},user_chat_id:privateChat,date:Math.floor(Date.now()/1000)}});
+ return h.sqlite.prepare('SELECT * FROM join_requests WHERE user_id=? AND chat_id=?').get(uid,chat);
+}
+test('join registration waits for admin approval and uses the join request private chat',async()=>{
+ const h=harness();try{
+  const j=await requestJoin(h,2,-100001,22222);assert.equal(h.calls.at(-1).chat_id,22222);assert.ok(!h.calls.some(c=>c.method==='approveChatJoinRequest'));
+  await h.cb(3,`join:start:${j.token}`);assert.equal(h.form(3),undefined);
+  await h.cb(2,`join:start:${j.token}`,{message_id:1,chat:{id:22222,type:'private'}});const s=h.form(2);assert.equal(s.chat_id,-100001);assert.equal(h.calls.at(-1).chat_id,22222);
+  await h.cb(2,`reg:kind:${s.token}:apartment`);await h.msg(2,'25');await h.msg(2,'2');await h.msg(2,'Olena Koval');await h.msg(2,'0671234567');await h.cb(2,`reg:role:${s.token}:owner`);await h.cb(2,`reg:submit:${s.token}`);
+  assert.ok(!h.calls.some(c=>c.method==='approveChatJoinRequest'));
+  const m=h.member(2,'25');await h.cb(1,`review:approve:${m.id}:${m.application_token}`);
+  const approvals=h.calls.filter(c=>c.method==='approveChatJoinRequest');assert.equal(approvals.length,1);assert.equal(approvals[0].user_id,2);assert.equal(approvals[0].chat_id,-100001);
+  assert.equal(h.sqlite.prepare('SELECT status FROM join_requests').get().status,'approved');
+  await h.cb(1,`review:approve:${m.id}:${m.application_token}`);assert.equal(h.calls.filter(c=>c.method==='approveChatJoinRequest').length,1);
+ }finally{h.close();}
+});
+
+test('join requests respect house registration and rejection',async()=>{
+ const h=harness(2);try{
+  await register(h,2);await requestJoin(h,2,-100001);assert.equal(h.calls.filter(c=>c.method==='approveChatJoinRequest').length,1);
+  const j=await requestJoin(h,2,-100002);assert.equal(h.calls.filter(c=>c.method==='approveChatJoinRequest').length,1);
+  await h.cb(2,`join:start:${j.token}`);assert.equal(h.form(2).chat_id,-100002);
+  const m=await register(h,2,{number:'95',floor:'3',chat:-100002,approve:false});
+  await h.cb(1,`review:reject:${m.id}:${m.application_token}`);
+  assert.equal(h.calls.filter(c=>c.method==='declineChatJoinRequest').length,1);assert.equal(h.sqlite.prepare('SELECT status FROM join_requests WHERE chat_id=-100002').get().status,'rejected');
+  assert.equal(h.member(2,'25').status,'approved');
+ }finally{h.close();}
+});
+
+test('failed join approval persists for retry, deduplicates requests and ignores unknown groups',async()=>{
+ const {retryJoins}=await import('../src/join-requests.ts');const h=harness();try{
+  await register(h,2);h.fail='approveChatJoinRequest';await requestJoin(h,2);
+  assert.equal(h.sqlite.prepare('SELECT decision FROM join_requests').get().decision,'approve');assert.equal(h.sqlite.prepare('SELECT status FROM join_requests').get().status,'pending');
+  h.fail=null;await retryJoins(h.env);assert.equal(h.sqlite.prepare('SELECT status FROM join_requests').get().status,'approved');
+  const before=h.calls.filter(c=>c.method==='approveChatJoinRequest').length;await retryJoins(h.env);assert.equal(h.calls.filter(c=>c.method==='approveChatJoinRequest').length,before);
+  await requestJoin(h,3,-100009);assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM join_requests WHERE user_id=3').get().n,0);
+  const j=await requestJoin(h,3);const update=h.lastUpdate;await h.post(update);assert.equal(h.sqlite.prepare('SELECT token FROM join_requests WHERE user_id=3').get().token,j.token);
+  await h.cb(3,`join:start:${j.token}`);const token=h.form(3).token;await h.cb(3,`join:start:${j.token}`);assert.equal(h.form(3).token,token);
+ }finally{h.close();}
+});
+
+test('failed join welcome can resume with Start in the right house and disconnected requests cannot approve',async()=>{
+ const h=harness(2);try{
+  let failed=false;h.apiOverride=(method,body)=>{if(method==='sendMessage'&&Number(body.chat_id)===2&&!failed){failed=true;return Response.json({ok:false},{status:403});}};
+  await requestJoin(h,2,-100002);assert.equal(h.sqlite.prepare('SELECT status FROM join_requests').get().status,'pending');
+  await h.msg(2,'/start');assert.equal(h.form(2).chat_id,-100002);
+  const j=h.sqlite.prepare('SELECT * FROM join_requests').get();h.sqlite.prepare("UPDATE groups SET status='disconnected' WHERE chat_id=-100002").run();
+  const before=h.calls.length;await h.cb(2,`join:start:${j.token}`);assert.equal(h.calls.slice(before).filter(c=>c.method==='approveChatJoinRequest').length,0);
+ }finally{h.close();}
+});
+
+test('Start resumes join registration for an existing profile without repeating submitted forms',async()=>{
+ const h=harness(2);try{
+  await register(h,2);await requestJoin(h,2,-100002);await h.msg(2,'/start');
+  const first=h.form(2);assert.equal(first.chat_id,-100002);assert.equal(JSON.parse(first.data).ask_phone,false);
+  await h.msg(2,'/start');assert.equal(h.form(2).token,first.token);
+  await h.cb(2,`reg:kind:${first.token}:apartment`);await h.msg(2,'95');await h.msg(2,'3');await h.cb(2,`reg:role:${first.token}:owner`);await h.cb(2,`reg:submit:${first.token}`);
+  await h.msg(2,'/start');assert.equal(h.form(2),undefined);assert.match(h.calls.at(-1).text,/Очікуйте підтвердження/);
+ }finally{h.close();}
+});
+
+test('successful entry sends one short private welcome with the resident keyboard, including returns',async()=>{
+ const {retryJoins}=await import('../src/join-requests.ts');const h=harness();try{
+  await register(h,2);const start=h.calls.length;await requestJoin(h,2);
+  const welcomes=()=>h.calls.slice(start).filter(c=>c.method==='sendMessage'&&c.text?.startsWith('🏡 Вітаємо у'));
+  assert.equal(welcomes().length,1);const welcome=welcomes()[0];assert.equal(welcome.chat_id,2);assert.match(welcome.text,/голосувати/);assert.ok(welcome.reply_markup.keyboard.flat().some(b=>b.text==='👤 Мої дані'));assert.equal(welcome.reply_markup.inline_keyboard,undefined);
+  await retryJoins(h.env);assert.equal(welcomes().length,1);
+  await requestJoin(h,2);assert.equal(welcomes().length,2);assert.equal(h.form(2),undefined);
+ }finally{h.close();}
+});
+
+test('welcome failure does not undo entry and retries without approving the request again',async()=>{
+ const {retryJoins}=await import('../src/join-requests.ts');const h=harness();try{
+  await register(h,2);let fail=true;
+  h.apiOverride=(method,body)=>method==='sendMessage'&&body.text?.startsWith('🏡 Вітаємо у')&&fail?Response.json({ok:false},{status:403}):undefined;
+  await requestJoin(h,2);let j=h.sqlite.prepare('SELECT * FROM join_requests').get();assert.equal(j.status,'approved');assert.equal(j.welcomed,0);
+  fail=false;await retryJoins(h.env);j=h.sqlite.prepare('SELECT * FROM join_requests').get();assert.equal(j.welcomed,1);assert.equal(h.calls.filter(c=>c.method==='approveChatJoinRequest').length,1);
+ }finally{h.close();}
+});

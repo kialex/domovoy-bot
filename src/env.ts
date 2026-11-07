@@ -18,5 +18,6 @@ export interface ChatMemberUpdate {
   old_chat_member: { status: string; is_member?: boolean };
   new_chat_member: { status: string; is_member?: boolean };
 }
-export interface Update { update_id: number; message?: Message; callback_query?: Callback; my_chat_member?: ChatMemberUpdate }
+export interface ChatJoinRequest { chat: {id:number;type:string;title?:string}; from:User; user_chat_id:number; date:number }
+export interface Update { chat_join_request?: ChatJoinRequest; update_id: number; message?: Message; callback_query?: Callback; my_chat_member?: ChatMemberUpdate }
 export type Button = { text: string; callback_data?: string; url?: string };

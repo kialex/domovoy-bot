@@ -10,11 +10,12 @@ import { startRegistration } from './registration.ts';
 export const RESIDENT_ACTIONS = {
   data: '👤 Мої дані', units: '🏠 Мої приміщення', polls: '🗳 Доступні голосування', add: '➕ Додати приміщення', menu: '🏠 Меню жителя',
 };
+export const residentKeyboard=()=>({keyboard:[[{text:RESIDENT_ACTIONS.data},{text:RESIDENT_ACTIONS.units}],[{text:RESIDENT_ACTIONS.polls}],[{text:RESIDENT_ACTIONS.add},{text:RESIDENT_ACTIONS.menu}]],resize_keyboard:true,is_persistent:true,one_time_keyboard:false});
 const statusLabel: Record<string,string> = { approved: '✅ Підтверджено', pending: '⏳ На перевірці', revoked: '🚫 Доступ вимкнено', rejected: 'Відхилено' };
 export async function residentMenu(env: Env, uid: number) {
   return telegram(env,'sendMessage',{
     chat_id:uid,text:'🏡 Кабінет мешканця\nОберіть дію на клавіатурі внизу. Ви можете додати кілька квартир або комерційних приміщень.',
-    reply_markup:{keyboard:[[{text:RESIDENT_ACTIONS.data},{text:RESIDENT_ACTIONS.units}],[{text:RESIDENT_ACTIONS.polls}],[{text:RESIDENT_ACTIONS.add},{text:RESIDENT_ACTIONS.menu}]],resize_keyboard:true,is_persistent:true,one_time_keyboard:false},
+    reply_markup:residentKeyboard(),
   });
 }
 export async function showOwnData(env: Env, uid: number) {

@@ -31,7 +31,7 @@ async function registerWebhook() {
       body: JSON.stringify({
         url: url.href,
         secret_token: webhookSecret,
-        allowed_updates: ["message", "callback_query", "my_chat_member"],
+        allowed_updates: ["message", "callback_query", "my_chat_member", "chat_join_request"],
         max_connections: 1,
       }),
       signal: AbortSignal.timeout(10_000),

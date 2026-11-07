@@ -1,3 +1,4 @@
+import { resolveJoin } from './join-requests.ts';
 import type { Button, Callback, Env, Message } from './env.ts';
 import { connectedGroups, getGroup, groupId, isConnected } from './groups.ts';
 import { answer, sendHtml } from './telegram.ts';
@@ -82,6 +83,13 @@ async function save(env: Env, s: Session, f: Form, step: string) {
   await env.HOME_DB.prepare('UPDATE sessions SET step=?,data=?,updated_at=unixepoch() WHERE user_id=? AND token=?').bind(step,JSON.stringify(f),s.user_id,s.token).run();
   return showForm(env, { ...s, step, data: JSON.stringify(f) });
 }
+export async function resumeRegistration(env:Env,uid:number,chatId:number) {
+  const current=await env.HOME_DB.prepare('SELECT * FROM sessions WHERE user_id=?').bind(uid).first<Session>();
+  if(current)return showForm(env,await normalizeSession(env,current));
+  const pending=await env.HOME_DB.prepare("SELECT m.id FROM memberships m JOIN premises p ON p.id=m.premise_id WHERE m.user_id=? AND p.chat_id=? AND m.status='pending' LIMIT 1").bind(uid,chatId).first();
+  if(pending)return plainCard(env,uid,'Заявку надіслано. Очікуйте підтвердження.');
+  return startRegistration(env,uid,`group_${Math.abs(chatId)}`);
+}
 export async function startRegistration(env: Env, uid: number, payload?: string) {
   let chatId: number | null = null; let pollId: number | undefined;
   if (payload?.startsWith('poll_')) {
@@ -90,8 +98,10 @@ export async function startRegistration(env: Env, uid: number, payload?: string)
     chatId = poll?.chat_id || null;
   } else if (payload?.startsWith('group_')) chatId = groupId(`-${payload.slice(6)}`);
   else {
+    const joining=await env.HOME_DB.prepare("SELECT j.chat_id FROM join_requests j JOIN groups g ON g.chat_id=j.chat_id WHERE j.user_id=? AND j.status='pending' AND j.decision='' AND g.status='approved' AND g.bot_present=1 ORDER BY j.update_id DESC LIMIT 1").bind(uid).first<{chat_id:number}>();
     const groups = await connectedGroups(env);
-    if (groups.length === 1) chatId = groups[0].chat_id;
+    if(joining)chatId=joining.chat_id;
+    else if (groups.length === 1) chatId = groups[0].chat_id;
     else return plainCard(env, uid, '🏡 Оберіть будинок\nДля нового будинку відкрийте реєстрацію з голосування у його групі. Для вже доданого приміщення використайте «Мої приміщення».');
   }
   if (!chatId || !isConnected(await getGroup(env, chatId))) return plainCard(env, uid, 'Будинок недоступний\nГрупу ще не підключено або від’єднано.');
@@ -135,7 +145,7 @@ const reviewButtons = (m: Membership): Button[][] => [[
 ]];
 async function notifyApplication(env: Env, m: Membership) {
   const group = await getGroup(env,m.chat_id); const f = JSON.parse(m.details) as Form;
-  return plainCard(env,env.ADMIN_TELEGRAM_USER_ID,`📬 Заявка на приміщення\n🏘 ${group?.title}\n\n${description(f)}\nTelegram ID: ${m.user_id}\n\nПідтвердьте особу, приміщення та право власності перед наданням ролі власника.`,reviewButtons(m));
+  return plainCard(env,env.ADMIN_TELEGRAM_USER_ID,`📬 Заявка на приміщення\n🏘 ${group?.title}\n\n${description(f)}\n\nПідтвердьте особу, приміщення та право власності перед наданням ролі власника.`,reviewButtons(m));
 }
 export async function registrationCallback(env: Env,q: Callback): Promise<boolean> {
   if (!q.data?.startsWith('reg:') && !q.data?.startsWith('review:')) return false;
@@ -161,10 +171,12 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
       ...(action === 'approve' && f.floor !== undefined ? [env.HOME_DB.prepare('UPDATE premises SET entrance=?,floor=?,business_name=? WHERE id=?').bind(f.entrance!,f.floor,f.business_name || '',m.id)] : []),
       env.HOME_DB.prepare('INSERT INTO membership_audit(actor_id,membership_id,action) VALUES (?,?,?)').bind(q.from.id,m.membership_id,action),
     ]);
+    await resolveJoin(env,m.user_id,m.chat_id,action==='approve');
     await answer(env,q.id,'');
     if (action === 'approve') await plainCard(env,q.from.id,`✅ Доступ надано\n${premiseLabel(m)} · ${m.name}`,[[{text:'👥 Користувачі приміщення',callback_data:`unit:members:${m.id}:0`}]]);
-    await plainCard(env,m.user_id,action === 'approve' ? `🎉 Доступ підтверджено\n${premiseLabel(m)}\n\nВи можете голосувати від цього приміщення. Свої дані та список мешканців можна переглянути через клавіатуру внизу.` : `Заявку відхилено\n${premiseLabel(m)}\n\nУточніть дані з адміністратором і подайте заявку знову.`);
-    if(String(m.user_id)!==env.ADMIN_TELEGRAM_USER_ID){const {residentMenu}=await import('./resident-menu.ts');await residentMenu(env,m.user_id);}
+    const joined=action==='approve'?await env.HOME_DB.prepare("SELECT token FROM join_requests WHERE user_id=? AND chat_id=? AND status='approved'").bind(m.user_id,m.chat_id).first():null;
+    if(!joined)await plainCard(env,m.user_id,action === 'approve' ? `🎉 Доступ підтверджено\n${premiseLabel(m)}\n\nВи можете голосувати від цього приміщення. Свої дані та список мешканців можна переглянути через клавіатуру внизу.` : `Заявку відхилено\n${premiseLabel(m)}\n\nУточніть дані з адміністратором і подайте заявку знову.`);
+    if(!joined&&String(m.user_id)!==env.ADMIN_TELEGRAM_USER_ID){const {residentMenu}=await import('./resident-menu.ts');await residentMenu(env,m.user_id);}
     return true;
   }
   let s = await env.HOME_DB.prepare('SELECT * FROM sessions WHERE user_id=? AND token=?').bind(q.from.id,value || '').first<Session>();

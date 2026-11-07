@@ -1,3 +1,4 @@
+import { joinRequest, joinCallback, retryJoins } from './join-requests.ts';
 import { HOUSE_RESIDENTS, houseResidents, directoryCallback } from './house-residents.ts';
 import { adminPollList, pollControls, pollControlCallback, scheduledReposts } from './poll-reposting.ts';
 import { RESIDENT_ACTIONS, residentCallback, residentMenu, showOwnData, showOwnUnits, availablePolls, addUnit } from './resident-menu.ts';
@@ -5,7 +6,7 @@ import { groupCallback, groupMembership, showGroups } from './groups.ts';
 import { ADMIN_ACTIONS, adminMenu, cancelPollWizard, requestPollWizard, pollWizardCallback, pollWizardMessage } from './poll-wizard.ts';
 import type { Env, Message, Update } from './env.ts';
 import { vote, openVoteIntent, privateVoteCallback } from './polls.ts';
-import { pendingRegistrations, registrationCallback, registrationMessage, startRegistration } from './registration.ts';
+import { pendingRegistrations, registrationCallback, registrationMessage, resumeRegistration, startRegistration } from './registration.ts';
 import { send } from './telegram.ts';
 import { positiveId } from './validation.ts';
 
@@ -33,6 +34,8 @@ async function message(env: Env, m: Message, updateId: number) {
   if (text === RESIDENT_ACTIONS.menu || (!admin && command === '/menu')) return residentMenu(env, m.from.id);
   if (command === '/start' && admin && !args[0]) return adminMenu(env);
   if (command === '/start' && !args[0]) {
+    const joining=await env.HOME_DB.prepare("SELECT j.chat_id FROM join_requests j JOIN groups g ON g.chat_id=j.chat_id WHERE j.user_id=? AND j.status='pending' AND j.decision='' AND g.status='approved' AND g.bot_present=1 ORDER BY j.update_id DESC LIMIT 1").bind(m.from.id).first<{chat_id:number}>();
+    if(joining)return resumeRegistration(env,m.from.id,joining.chat_id);
     const profile = await env.HOME_DB.prepare('SELECT user_id FROM profiles WHERE user_id=?').bind(m.from.id).first();
     if (profile) return residentMenu(env, m.from.id);
   }
@@ -57,10 +60,20 @@ async function message(env: Env, m: Message, updateId: number) {
   return registrationMessage(env, m);
 }
 export async function handleUpdate(env: Env, update: Update) {
+  const privateMessage=update.message||update.callback_query?.message;
+  const sender=update.message?.from||update.callback_query?.from;
+  if(privateMessage?.chat.type==='private'&&sender&&!sender.is_bot){
+    await env.HOME_DB.prepare('INSERT INTO private_chats VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id').bind(sender.id,privateMessage.chat.id).run();
+    // Telegram's join-request private chat identifier may differ from the user ID.
+    // Route by authenticated sender; outbound messages use the stored chat identifier.
+    privateMessage.chat={...privateMessage.chat,id:sender.id};
+  }
+  if(update.chat_join_request)return joinRequest(env,update.chat_join_request,update.update_id);
   if (update.my_chat_member) return groupMembership(env, update.my_chat_member, update.update_id);
   if (update.callback_query) {
     const q = update.callback_query;
     if (q.from.is_bot) return;
+    if (await joinCallback(env,q)) return;
     if (await directoryCallback(env,q)) return;
     if (await pollControlCallback(env,q,update.update_id)) return;
     if (await privateVoteCallback(env, q)) return;
@@ -74,6 +87,7 @@ export async function handleUpdate(env: Env, update: Update) {
 export default {
   async scheduled(_event:unknown,env:Env):Promise<void> {
     await scheduledReposts(env);
+    await retryJoins(env);
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const path = new URL(request.url).pathname;

@@ -71,7 +71,7 @@ async function poll(h,chat=-100001,interval=0,duration=0) {
   await h.msg(1,'🗳 Створити голосування');
   const d=h.sqlite.prepare('SELECT * FROM poll_drafts').get();assert.ok(d);
   if(!d.chat_id){const g=h.sqlite.prepare('SELECT * FROM groups WHERE chat_id=?').get(chat);await h.cb(1,`draft:group:${d.token}:${chat}:${g.version}`);}
-  await h.msg(1,'Repair <lift> & entrance?');await h.msg(1,'Yes');await h.msg(1,'No');
+  await h.msg(1,'Repair <lift> & entrance?');await h.cb(1,`draft:skipdescription:${d.token}`);await h.msg(1,'Yes');await h.msg(1,'No');
   await h.cb(1,`draft:preview:${d.token}`);assert.equal(h.sqlite.prepare('SELECT step FROM poll_drafts').get().step,'duration');
   await h.cb(1,`draft:duration:${d.token}:${duration}`);assert.equal(h.sqlite.prepare('SELECT step FROM poll_drafts').get().step,'interval');
   await h.cb(1,`draft:interval:${d.token}:${interval}`);await h.cb(1,`draft:publish:${d.token}`);
@@ -241,7 +241,7 @@ test('webhook secret, invalid payload, idempotency and Telegram failure retries'
     await h.msg(1,'/start');const update=h.lastUpdate;const before=h.calls.length;await h.post(update);assert.equal(h.calls.length,before);
     await h.msg(1,'🗳 Створити голосування');
     const d=h.sqlite.prepare('SELECT * FROM poll_drafts').get();
-    await h.msg(1,'Retry');await h.msg(1,'Yes');await h.msg(1,'No');
+    await h.msg(1,'Retry');await h.cb(1,`draft:skipdescription:${d.token}`);await h.msg(1,'Yes');await h.msg(1,'No');
     await h.cb(1,`draft:preview:${d.token}`);await h.cb(1,`draft:duration:${d.token}:0`);await h.cb(1,`draft:interval:${d.token}:0`);
     const request={update_id:h.nextId(),callback_query:{id:'retry-publish',from:{id:1},data:`draft:publish:${d.token}`,message:{message_id:1,chat:{id:1,type:'private'}}}};
     h.fail='sendMessage';assert.equal((await h.post(request)).status,503);assert.equal(h.sqlite.prepare('SELECT state FROM updates WHERE id=?').get(request.update_id),undefined);
@@ -342,7 +342,7 @@ test('bulk vote changes only the requesting authors own votes',async()=>{
 test('wizard interval selection is mandatory, validated and saved with scheduled time',async()=>{
   const h=harness();try{
     await h.msg(1,'🗳 Створити голосування');const d=h.sqlite.prepare('SELECT * FROM poll_drafts').get();
-    await h.msg(1,'Question');await h.msg(1,'Yes');await h.msg(1,'No');await h.cb(1,`draft:preview:${d.token}`);
+    await h.msg(1,'Question');await h.cb(1,`draft:skipdescription:${d.token}`);await h.msg(1,'Yes');await h.msg(1,'No');await h.cb(1,`draft:preview:${d.token}`);
     assert.equal(h.sqlite.prepare('SELECT step FROM poll_drafts').get().step,'duration');
     await h.cb(1,`draft:duration:${d.token}:0`);
     await h.cb(1,`draft:publish:${d.token}`);assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM polls').get().n,0);
@@ -495,7 +495,7 @@ test('lettered apartments are separate from numeric ones, but equivalent spellin
 test('deadline is chosen before interval and is not extended by raising a poll',async()=>{
   const {raisePoll}=await import('../src/poll-reposting.ts');const h=harness();try{
     await h.msg(1,'🗳 Створити голосування');const d=h.sqlite.prepare('SELECT * FROM poll_drafts').get();
-    await h.msg(1,'Time limited');await h.msg(1,'Yes');await h.msg(1,'No');await h.cb(1,`draft:preview:${d.token}`);
+    await h.msg(1,'Time limited');await h.cb(1,`draft:skipdescription:${d.token}`);await h.msg(1,'Yes');await h.msg(1,'No');await h.cb(1,`draft:preview:${d.token}`);
     assert.equal(h.sqlite.prepare('SELECT step FROM poll_drafts').get().step,'duration');
     await h.cb(1,`draft:duration:${d.token}:99`);assert.equal(h.sqlite.prepare('SELECT duration_days FROM poll_drafts').get().duration_days,null);
     await h.cb(2,`draft:duration:${d.token}:5`);assert.equal(h.sqlite.prepare('SELECT duration_days FROM poll_drafts').get().duration_days,null);
@@ -959,4 +959,32 @@ test('poll registration explains why it opened before asking for the premise',as
   const token=h.form(2).token;await h.cb(2,`reg:kind:${token}:apartment`);
   assert.equal(h.calls.at(-1).text,'Напишіть номер квартири.');
  }finally{h.close();}
+});
+
+test('poll wizard validates a short title and separate description; cards retain it through voting and closing',async()=>{
+ const h=harness();try{
+  await h.msg(1,'🗳 Створити голосування');const d=h.sqlite.prepare('SELECT * FROM poll_drafts').get();
+  await h.msg(1,'A'.repeat(101));assert.equal(h.sqlite.prepare('SELECT step FROM poll_drafts').get().step,'question');
+  const title='A'.repeat(100);await h.msg(1,title);assert.equal(h.sqlite.prepare('SELECT step FROM poll_drafts').get().step,'description');
+  await h.msg(1,'D'.repeat(1001));assert.equal(h.sqlite.prepare('SELECT step FROM poll_drafts').get().step,'description');
+  await h.msg(1,'Ремонт <ліфта> & входу.\nВартість: 500 грн.');
+  await h.msg(1,'Yes');await h.msg(1,'No');await h.cb(1,`draft:preview:${d.token}`);await h.cb(1,`draft:duration:${d.token}:0`);await h.cb(1,`draft:interval:${d.token}:0`);
+  assert.match(h.calls.at(-1).text,/Вартість: 500 грн/);await h.cb(1,`draft:publish:${d.token}`);
+  const p=h.sqlite.prepare('SELECT * FROM polls').get();assert.equal(p.question,title);assert.match(p.description,/Ремонт <ліфта>/);
+  const card=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).at(-1);assert.match(card.text,/Ремонт &lt;ліфта&gt; &amp; входу/);
+  await register(h,2);await cast(h,2,p,0);assert.match(h.calls.filter(c=>c.method==='editMessageText').at(-1).text,/Вартість: 500 грн/);
+  await h.cb(1,`pollctl:raise:${p.id}`);assert.match(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).at(-1).text,/Вартість: 500 грн/);
+  await closePoll(h,p.id);assert.match(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).at(-1).text,/Вартість: 500 грн/);
+  await h.cb(1,`pollctl:results:${p.id}`);assert.match(h.calls.at(-1).text,/Вартість: 500 грн/);
+ }finally{h.close();}
+});
+
+test('description migration preserves legacy titles and active drafts without truncation',()=>{
+ const {sqlite}=database('0016');try{
+  sqlite.prepare(`INSERT INTO polls(source_update_id,question,options,chat_id,status,created_by) VALUES (1,?,'["Yes","No"]',-100001,'open',1)`).run('A'.repeat(250));
+  sqlite.exec("INSERT INTO poll_drafts(user_id,token,source_update_id,step,question,options) VALUES (1,'old',2,'options','Old draft','[]')");
+  sqlite.exec(readFileSync(new URL('../migrations/0016_poll_description.sql',import.meta.url),'utf8'));
+  assert.equal(sqlite.prepare('SELECT question FROM polls').get().question.length,250);assert.equal(sqlite.prepare('SELECT description FROM polls').get().description,'');
+  assert.equal(sqlite.prepare('SELECT step,description FROM poll_drafts').get().step,'options');assert.equal(sqlite.prepare('SELECT description FROM poll_drafts').get().description,'');
+ }finally{sqlite.close();}
 });

@@ -6,7 +6,7 @@ import type { Button, Callback, Env, Message } from './env.ts';
 import { createPoll } from './polls.ts';
 import { answer, send, telegram } from './telegram.ts';
 
-interface Draft { token: string; source_update_id: number; step: string; question: string; options: string; chat_id: number | null; group_version: number | null; repost_interval: number | null; duration_days:number|null }
+interface Draft { token: string; source_update_id: number; step: string; question: string; description:string; options: string; chat_id: number | null; group_version: number | null; repost_interval: number | null; duration_days:number|null }
 const cancelButton = (token: string): Button[] => [{ text: 'Скасувати', callback_data: `draft:cancel:${token}` }];
 export const ADMIN_ACTIONS = {
   poll: '🗳 Створити голосування',
@@ -53,11 +53,11 @@ export async function startPollWizard(env: Env, updateId: number) {
   if (!groups.length) return send(env, env.ADMIN_TELEGRAM_USER_ID, 'Спочатку підключіть групу: додайте бота до неї та підтвердіть заявку в особистому чаті.');
   const token = crypto.randomUUID().slice(0, 8);
   await env.HOME_DB.prepare(`INSERT INTO poll_drafts(user_id,token,source_update_id,step) VALUES (?,?,?,'question')
-    ON CONFLICT(user_id) DO UPDATE SET token=excluded.token,source_update_id=excluded.source_update_id,step='question',question=NULL,options='[]',chat_id=NULL,group_version=NULL,repost_interval=NULL,duration_days=NULL`)
+    ON CONFLICT(user_id) DO UPDATE SET token=excluded.token,source_update_id=excluded.source_update_id,step='question',question=NULL,description='',options='[]',chat_id=NULL,group_version=NULL,repost_interval=NULL,duration_days=NULL`)
     .bind(env.ADMIN_TELEGRAM_USER_ID, token, updateId).run();
   if (groups.length > 1) return choosePollGroup(env, token);
   await env.HOME_DB.prepare('UPDATE poll_drafts SET chat_id=?,group_version=? WHERE user_id=? AND token=?').bind(groups[0].chat_id, groups[0].version, env.ADMIN_TELEGRAM_USER_ID, token).run();
-  return send(env, env.ADMIN_TELEGRAM_USER_ID, `Група: ${groups[0].title}\n\nНапишіть питання для голосування (до 300 символів).`, [cancelButton(token)]);
+  return send(env, env.ADMIN_TELEGRAM_USER_ID, `Група: ${groups[0].title}\n\nНапишіть назву голосування (до 100 символів).`, [cancelButton(token)]);
 }
 async function choosePollGroup(env: Env, token: string, page = 0) {
   const groups = await connectedGroups(env);
@@ -81,7 +81,7 @@ async function intervalChoice(env: Env, token: string) {
 }
 async function preview(env:Env,draft:Draft,groupTitle:string) {
   const options=JSON.parse(draft.options) as string[];
-  return send(env,env.ADMIN_TELEGRAM_USER_ID,`Попередній перегляд\nГрупа: ${groupTitle}\n\n${draft.question}\n\n${options.map((o,i)=>`${i+1}. ${o}`).join('\n')}\n\n📅 Тривалість: ${durationLabel(draft.duration_days!)}\n⏱ Підняття: ${intervalLabel(draft.repost_interval!)}\nОдин голос від приміщення.`,[
+  return send(env,env.ADMIN_TELEGRAM_USER_ID,`Попередній перегляд\nГрупа: ${groupTitle}\n\n${draft.question}${draft.description?`\n\n${draft.description}`:''}\n\n${options.map((o,i)=>`${i+1}. ${o}`).join('\n')}\n\n📅 Тривалість: ${durationLabel(draft.duration_days!)}\n⏱ Підняття: ${intervalLabel(draft.repost_interval!)}\nОдин голос від приміщення.`,[
     [{text:'✅ Опублікувати в групі',callback_data:`draft:publish:${draft.token}`}],
     [{text:'📅 Змінити тривалість',callback_data:`draft:durationmenu:${draft.token}`}],
     [{text:'⏱ Змінити інтервал',callback_data:`draft:intervalmenu:${draft.token}`}],cancelButton(draft.token),
@@ -106,12 +106,17 @@ export async function pollWizardMessage(env: Env, message: Message): Promise<boo
     return true;
   }
   if (draft.step === 'question') {
-    if (!text || text.length > 300) {
-      await send(env, message.chat.id, 'Надішліть текст питання від 1 до 300 символів.'); return true;
+    if (!text || text.length > 100) {
+      await send(env, message.chat.id, 'Назва має містити від 1 до 100 символів.'); return true;
     }
-    await env.HOME_DB.prepare("UPDATE poll_drafts SET question=?, step='options' WHERE user_id=? AND token=?").bind(text, message.from!.id, draft.token).run();
-    await send(env, message.chat.id, 'Тепер надішліть перший варіант відповіді. Кожен варіант — окремим повідомленням (від 2 до 8 варіантів).', [cancelButton(draft.token)]);
+    await env.HOME_DB.prepare("UPDATE poll_drafts SET question=?, step='description' WHERE user_id=? AND token=?").bind(text, message.from!.id, draft.token).run();
+    await send(env,message.chat.id,'Додайте опис голосування (до 1000 символів) або пропустіть.',[[{text:'Без опису',callback_data:`draft:skipdescription:${draft.token}`}],cancelButton(draft.token)]);
     return true;
+  }
+  if(draft.step==='description'){
+    if(!text||text.length>1000){await send(env,message.chat.id,'Опис має містити від 1 до 1000 символів.');return true;}
+    await env.HOME_DB.prepare("UPDATE poll_drafts SET description=?,step='options' WHERE user_id=? AND token=?").bind(text,message.from!.id,draft.token).run();
+    await send(env,message.chat.id,'Надішліть перший варіант відповіді.',[cancelButton(draft.token)]);return true;
   }
   const options = JSON.parse(draft.options) as string[];
   if (!text || text.length > 60 || options.includes(text) || options.length >= 8) {
@@ -164,11 +169,15 @@ export async function pollWizardCallback(env: Env, q: Callback, updateId: number
     if (!isConnected(group) || group.version !== Number(version)) { await answer(env, q.id, 'Це підключення вже недоступне. Оберіть іншу групу.'); return true; }
     await env.HOME_DB.prepare('UPDATE poll_drafts SET chat_id=?,group_version=? WHERE user_id=? AND token=? AND chat_id IS NULL').bind(id, group.version, q.from.id, token).run();
     await answer(env, q.id, 'Групу обрано.');
-    await send(env, q.from.id, `Група: ${group.title}\n\nНапишіть питання для голосування (до 300 символів).`, [cancelButton(token)]); return true;
+    await send(env, q.from.id, `Група: ${group.title}\n\nНапишіть назву голосування (до 100 символів).`, [cancelButton(token)]); return true;
   }
   const group = draft.chat_id ? await getGroup(env, draft.chat_id) : null;
   if (!isConnected(group) || group.version !== draft.group_version) {
     await answer(env, q.id, 'Підключення групи змінилося. Скасуйте чернетку та оберіть групу знову.'); return true;
+  }
+  if(action==='skipdescription'&&draft.step==='description'){
+    await env.HOME_DB.prepare("UPDATE poll_drafts SET description='',step='options' WHERE user_id=? AND token=?").bind(q.from.id,token).run();
+    await answer(env,q.id,'');await send(env,q.from.id,'Надішліть перший варіант відповіді.',[cancelButton(token)]);return true;
   }
   const options = JSON.parse(draft.options) as string[];
   if(action==='durationmenu' && draft.step==='preview'){
@@ -213,7 +222,7 @@ export async function pollWizardCallback(env: Env, q: Callback, updateId: number
   if (action === 'publish' && draft.step === 'preview' && draft.repost_interval !== null && draft.duration_days !== null && options.length >= 2) {
     await answer(env, q.id, 'Публікую голосування.');
     // Stable source ID prevents repeated Publish taps from creating multiple polls.
-    const published = await createPoll(env, { question: draft.question, options }, draft.source_update_id, group.chat_id, group.version, draft.repost_interval, draft.duration_days);
+    const published = await createPoll(env, { question: draft.question, description:draft.description, options }, draft.source_update_id, group.chat_id, group.version, draft.repost_interval, draft.duration_days);
     if (!published) return true;
     await env.HOME_DB.prepare("UPDATE poll_drafts SET step='published' WHERE user_id=? AND token=?").bind(q.from.id, token).run();
     await adminMenu(env); return true;

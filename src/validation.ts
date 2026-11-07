@@ -7,7 +7,7 @@ export function apartmentNumber(value: string): string | null {
 export function parsePoll(value: string) {
   const parts = value.split('|').map(v => v.trim());
   const [question, ...options] = parts;
-  if (!question || question.length > 300 || options.length < 2 || options.length > 8 ||
+  if (!question || question.length > 100 || options.length < 2 || options.length > 8 ||
       options.some(v => !v || v.length > 60) || new Set(options).size !== options.length) return null;
   return { question, options };
 }

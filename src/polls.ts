@@ -8,11 +8,11 @@ import type { Button, Callback, Env } from './env.ts';
 import { answer, botStartUrl, registrationUrl, send, sendHtml, telegram } from './telegram.ts';
 import { parsePoll, positiveId } from './validation.ts';
 
-interface Poll { id: number; question: string; options: string; chat_id: number; message_id: number | null; status: string; ends_at?:number|null; closed_at?:number|null }
-export async function createPoll(env: Env, input: string | { question: string; options: string[] }, updateId: number, chatId?: number, groupVersion?: number, repostInterval = 0, durationDays = 0) {
+interface Poll { id: number; question: string; description?:string; options: string; chat_id: number; message_id: number | null; status: string; ends_at?:number|null; closed_at?:number|null }
+export async function createPoll(env: Env, input: string | { question: string; description?:string; options: string[] }, updateId: number, chatId?: number, groupVersion?: number, repostInterval = 0, durationDays = 0) {
   if (!validInterval(repostInterval) || !validDuration(durationDays)) return false;
-  const parsed = typeof input === 'string' ? parsePoll(input) : input;
-  if (!parsed) return send(env, env.ADMIN_TELEGRAM_USER_ID, 'Оберіть «Створити голосування» в меню. Бот по черзі запитає питання, варіанти, тривалість і частоту підняття.');
+  const parsed:{question:string;options:string[];description?:string}|null = typeof input === 'string' ? parsePoll(input) : input;
+  if (!parsed||!parsed.question.trim()||parsed.question.length>100||(parsed.description||'').length>1000){await send(env,env.ADMIN_TELEGRAM_USER_ID,'Назва — до 100 символів, опис — до 1000. Створіть голосування через нижнє меню.');return false;}
   if (!chatId) {
     const groups = await connectedGroups(env);
     if (groups.length !== 1) {
@@ -25,8 +25,8 @@ export async function createPoll(env: Env, input: string | { question: string; o
   if (!isConnected(group) || (groupVersion !== undefined && group.version !== groupVersion)) {
     await send(env, env.ADMIN_TELEGRAM_USER_ID, 'Підключення цієї групи змінилося. Створіть нову чернетку й оберіть групу знову.'); return false;
   }
-  await env.HOME_DB.prepare('INSERT INTO polls(question,options,chat_id,created_by,source_update_id,repost_interval,duration_days) VALUES (?,?,?,?,?,?,?) ON CONFLICT(source_update_id) DO NOTHING')
-    .bind(parsed.question, JSON.stringify(parsed.options), chatId, env.ADMIN_TELEGRAM_USER_ID, updateId, repostInterval, durationDays).run();
+  await env.HOME_DB.prepare('INSERT INTO polls(question,options,chat_id,created_by,source_update_id,repost_interval,duration_days,description) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(source_update_id) DO NOTHING')
+    .bind(parsed.question, JSON.stringify(parsed.options), chatId, env.ADMIN_TELEGRAM_USER_ID, updateId, repostInterval, durationDays,parsed.description||'').run();
   const poll = await env.HOME_DB.prepare('SELECT * FROM polls WHERE source_update_id=?').bind(updateId).first<Poll>();
   if (!poll) throw new Error('Poll creation failed');
   if (poll.message_id) return true;
@@ -45,7 +45,7 @@ export async function livePollView(env: Env, poll: Poll) {
   const { results } = await env.HOME_DB.prepare('SELECT option_index,COUNT(*) AS count FROM premise_votes WHERE poll_id=? GROUP BY option_index').bind(poll.id).all<{ option_index: number; count: number }>();
   const counts = new Map(results.map(r => [r.option_index, r.count]));
   return {
-    text: pollCard(poll.id, poll.question, options, counts, poll.status==='closed',{endsAt:poll.ends_at,closedAt:poll.closed_at}),
+    text: pollCard(poll.id, poll.question, options, counts, poll.status==='closed',{endsAt:poll.ends_at,closedAt:poll.closed_at,description:poll.description}),
     buttons: poll.status==='closed'?[]:[
       ...options.map((text, index) => [{ text: `${text} · ${counts.get(index) || 0}`, callback_data: `vote:${poll.id}:${index}` }]),
     ],
@@ -188,6 +188,6 @@ export async function pollResults(env: Env, id: number, close: boolean) {
   const { results } = await env.HOME_DB.prepare('SELECT option_index, COUNT(*) AS count FROM premise_votes WHERE poll_id=? GROUP BY option_index').bind(id).all<{ option_index: number; count: number }>();
   const counts = new Map(results.map(r => [r.option_index, r.count]));
   const options = JSON.parse(poll.options) as string[];
-  const text = pollCard(id, poll.question, options, counts, close || poll.status === 'closed',{endsAt:poll.ends_at,closedAt:poll.closed_at});
+  const text = pollCard(id, poll.question, options, counts, close || poll.status === 'closed',{endsAt:poll.ends_at,closedAt:poll.closed_at,description:poll.description});
   return sendHtml(env, env.ADMIN_TELEGRAM_USER_ID, text);
 }

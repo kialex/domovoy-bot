@@ -11,7 +11,8 @@ function remaining(until:number,now:number){
   if(seconds>=3600)return `Залишилось: ${Math.ceil(seconds/3600)} год.`;
   return `Залишилось: ${Math.ceil(seconds/60)} хв.`;
 }
-export function pollCard(id:number,question:string,options:string[],counts:Map<number,number>,closed:boolean,meta:{endsAt?:number|null;closedAt?:number|null;now?:number}={}) {
+export function pollCard(id:number,question:string,options:string[],counts:Map<number,number>,closed:boolean,meta:{description?:string;endsAt?:number|null;closedAt?:number|null;now?:number}={}) {
+  const description=meta.description?`\n\n${escapeHtml(meta.description)}`:'';
   const total=[...counts.values()].reduce((sum,count)=>sum+count,0);
   const results=options.map((option,index)=>{
     const count=counts.get(index)||0;const percent=total?Math.round(count/total*100):0;
@@ -27,7 +28,7 @@ export function pollCard(id:number,question:string,options:string[],counts:Map<n
     const best=Math.max(0,...options.map((_,index)=>counts.get(index)||0));
     const leaders=options.filter((_,index)=>(counts.get(index)||0)===best);
     const outcome=total===0?'Голосів не подано.':leaders.length===1?`Найбільше голосів — «${escapeHtml(leaders[0])}».`:`Однакова кількість голосів: ${leaders.map(v=>`«${escapeHtml(v)}»`).join(', ')}.`;
-    return `🏁 <b>Підсумки голосування</b>\n\n<b>${escapeHtml(question)}</b>\n\n${results}\n\n🏘 Проголосувало приміщень: <b>${total}</b>${date}\n\n<b>${outcome}</b>`;
+    return `🏁 <b>Підсумки голосування: ${escapeHtml(question)}</b>${description}\n\n${results}\n\n🏘 Проголосувало приміщень: <b>${total}</b>${date}\n\n<b>${outcome}</b>`;
   }
-  return `🗳 <b>Голосування будинку</b>\n🟢 Відкрите${date}\n\n<b>${escapeHtml(question)}</b>\n\n${results}\n\n🏘 Проголосувало приміщень: <b>${total}</b>\n\n<i>Оберіть відповідь кнопкою нижче.\nОдин голос від приміщення. Змінити відповідь може лише той, хто її подав, до завершення голосування.</i>`;
+  return `🗳 <b>Голосування будинку: ${escapeHtml(question)}</b>\n🟢 Відкрите${date}${description}\n\n${results}\n\n🏘 Проголосувало приміщень: <b>${total}</b>\n\n<i>Оберіть відповідь кнопкою нижче.\nОдин голос від приміщення. Змінити відповідь може лише той, хто її подав, до завершення голосування.</i>`;
 }

@@ -78,7 +78,7 @@ function castStatement(env:Env,poll:Poll,uid:number,premiseId:number,option:numb
     WHERE premise_votes.user_id=excluded.user_id`).bind(option,poll.id,premiseId,uid);
 }
 function voterLabel(name:string, role:string) {
-  return `${name || 'Мешканець'} · ${['owner','tenant'].includes(role) ? roleLabel(role) : 'мешканець'}`;
+  return `${name || 'Мешканець'} · ${['owner','tenant','family'].includes(role) ? roleLabel(role) : 'мешканець'}`;
 }
 async function alreadyVoted(env:Env,uid:number,pollId:number,premiseId:number) {
   const old=await env.HOME_DB.prepare(`SELECT v.voter_name,v.voter_role FROM premise_votes v
@@ -86,7 +86,7 @@ async function alreadyVoted(env:Env,uid:number,pollId:number,premiseId:number) {
     WHERE v.poll_id=? AND v.premise_id=? AND viewer.user_id=? AND viewer.status='approved' AND g.status='approved' AND g.bot_present=1`)
     .bind(pollId,premiseId,uid).first<{voter_name:string;voter_role:string}>();
   if (!old) return 'Голосування недоступне або ваш доступ змінився.';
-  const role = ['owner','tenant'].includes(old.voter_role) ? roleLabel(old.voter_role) : 'мешканець';
+  const role = ['owner','tenant','family'].includes(old.voter_role) ? roleLabel(old.voter_role) : 'мешканець';
   const suffix = ` · ${role}\nЯкщо ваші думки не збігаються, зверніться до цієї людини та попросіть змінити свій голос.`;
   const name = (old.voter_name || 'Мешканець').slice(0,200 - 'Голос подав: '.length - suffix.length);
   return `Голос подав: ${name}${suffix}`;

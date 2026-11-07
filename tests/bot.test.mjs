@@ -46,6 +46,7 @@ function harness(groups=1) {
     const method=url.split('/').at(-1);const body=JSON.parse(init.body);calls.push({method,...body});
     if(h.apiOverride){const response=await h.apiOverride(method,body);if(response)return response;}
     if(h.fail===method)return Response.json({ok:false},{status:503});
+    if(method==='getChatMember')return Response.json({ok:true,result:{status:'left'}});
     return Response.json({ok:true,result:{username:'HomeTestBot',message_id:++message}});
   };
   return h;
@@ -679,7 +680,7 @@ test('registration asks each field briefly without repeated headers or duplicate
   await h.msg(2,'0');assert.equal(h.calls.filter(c=>c.method==='sendMessage').length,before+1);assert.equal(h.form(2).step,'floor');
   await h.msg(2,'2');assert.equal(h.calls.at(-1).text.trim(),'Напишіть ім’я та прізвище.');
   await h.msg(2,'Olena Koval');assert.equal(h.calls.at(-1).text.trim(),'Напишіть номер телефону.');
-  await h.msg(2,'0671234567');assert.equal(h.calls.at(-1).text.trim(),'Ви власник чи орендар?');
+  await h.msg(2,'0671234567');assert.equal(h.calls.at(-1).text.trim(),'Оберіть вашу роль.');
  }finally{h.close();}
 });
 
@@ -802,4 +803,70 @@ test('join invitation explains registration and admin approval; form prompts sta
   assert.equal(question.text,'Напишіть номер квартири.');assert.equal(question.parse_mode,undefined);
   assert.equal(question.reply_markup.inline_keyboard.length,1);assert.equal(question.reply_markup.inline_keyboard[0].length,2);
  }finally{h.close();}
+});
+
+test('existing Telegram members register as owners or tenants without admin applications',async()=>{
+ const h=harness();try{
+  h.apiOverride=(method,body)=>method==='getChatMember'?Response.json({ok:true,result:{status:'member'}}):undefined;
+  const before=h.calls.length;const owner=await register(h,2);const tenant=await register(h,3,{number:'26',role:'tenant'});
+  assert.equal(owner.status,'approved');assert.equal(tenant.status,'approved');
+  assert.equal(h.calls.slice(before).filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===1).length,0);
+  assert.equal(h.sqlite.prepare("SELECT COUNT(*) AS n FROM membership_audit WHERE action='auto_approve_group_member'").get().n,2);
+  const p=await poll(h);await cast(h,2,p,0);assert.equal(currentVotes(h).length,1);
+ }finally{h.close();}
+});
+
+test('Telegram membership status is checked in the selected house',async()=>{
+ const h=harness(2);try{
+  h.apiOverride=(method,body)=>method==='getChatMember'?Response.json({ok:true,result:{status:Number(body.chat_id)===-100001?'member':'left'}}):undefined;
+  assert.equal((await register(h,2)).status,'approved');
+  assert.equal((await register(h,2,{chat:-100002,number:'95',floor:'3',approve:false})).status,'pending');
+ }finally{h.close();}
+});
+
+test('restricted members qualify only when present; left and banned applicants require review',async()=>{
+ for(const [status,is_member,expected] of [['administrator',undefined,'approved'],['creator',undefined,'approved'],['restricted',true,'approved'],['restricted',false,'pending'],['left',undefined,'pending'],['kicked',undefined,'pending']]){
+  const h=harness();try{
+   h.apiOverride=method=>method==='getChatMember'?Response.json({ok:true,result:{status,is_member}}):undefined;
+   assert.equal((await register(h,2,{approve:false})).status,expected);
+  }finally{h.close();}
+ }
+});
+
+test('failed membership lookup preserves registration for retry without creating an application',async()=>{
+ const h=harness();try{
+  await h.msg(2,'/start');const token=h.form(2).token;
+  await h.cb(2,`reg:kind:${token}:apartment`);await h.msg(2,'25');await h.msg(2,'2');await h.msg(2,'Olena Koval');await h.msg(2,'0671234567');await h.cb(2,`reg:role:${token}:owner`);
+  h.fail='getChatMember';await h.cb(2,`reg:submit:${token}`);assert.equal(h.form(2).step,'review');assert.equal(h.member(2,'25'),undefined);assert.match(h.calls.at(-1).text,/Не вдалося перевірити/);
+  h.fail=null;h.apiOverride=method=>method==='getChatMember'?Response.json({ok:true,result:{status:'member'}}):undefined;
+  await h.cb(2,`reg:submit:${token}`);assert.equal(h.member(2,'25').status,'approved');assert.equal(h.form(2),undefined);
+ }finally{h.close();}
+});
+
+test('family members register, vote with their role and cannot manage residents; owner can revoke them',async()=>{
+ const h=harness();try{
+  const owner=await register(h,2);const family=await register(h,3,{role:'family'});await register(h,4,{role:'tenant'});
+  assert.equal(family.role,'family');const p=await poll(h);await cast(h,3,p,0);assert.equal(currentVotes(h)[0].voter_role,'family');
+  await cast(h,2,p,1);assert.match(h.calls.at(-1).text,/Член сім’ї/);assert.equal(currentVotes(h)[0].option_index,0);
+  await h.cb(3,`unit:remove:${owner.id}:${owner.version}`);assert.equal(h.member(2,'25').status,'approved');
+  const tenant=h.member(4,'25');await h.cb(3,`unit:remove:${tenant.id}:${tenant.version}`);assert.equal(h.member(4,'25').status,'approved');
+  await h.cb(2,`unit:members:${owner.premise_id}:0`);assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`unit:askremove:${family.id}:${family.version}`));
+  await h.cb(2,`unit:askremove:${family.id}:${family.version}`);await h.cb(2,`unit:remove:${family.id}:${family.version}`);assert.equal(h.member(3,'25').status,'revoked');assert.equal(currentVotes(h).length,1);
+ }finally{h.close();}
+});
+
+test('family role migration preserves existing memberships, audit and votes',()=>{
+ const {sqlite}=database('0014');try{
+  sqlite.exec(`INSERT INTO groups(chat_id,title,status,bot_present,added_by,version,last_event_id) VALUES (-100001,'House','approved',1,1,1,1);
+   INSERT INTO profiles(user_id,name,phone) VALUES (2,'Person','+380671234567');
+   INSERT INTO premises(id,chat_id,kind,number,number_start,number_end,entrance,floor) VALUES (1,-100001,'apartment','25',25,25,1,2);
+   INSERT INTO memberships(id,user_id,premise_id,role,status,application_token,version) VALUES (17,2,1,'owner','approved','old',4);
+   INSERT INTO membership_audit(actor_id,membership_id,action) VALUES (1,17,'approve');
+   INSERT INTO polls(id,source_update_id,chat_id,question,options,status,created_by) VALUES (1,1,-100001,'Question','["Yes","No"]','open',1);
+   INSERT INTO premise_votes(poll_id,premise_id,user_id,option_index,voter_role) VALUES (1,1,2,0,'owner');`);
+  sqlite.exec(readFileSync(new URL('../migrations/0014_family_role.sql',import.meta.url),'utf8'));
+  assert.equal(sqlite.prepare('SELECT role,version FROM memberships WHERE id=17').get().version,4);
+  assert.equal(sqlite.prepare('SELECT membership_id FROM membership_audit').get().membership_id,17);assert.equal(sqlite.prepare('SELECT voter_role FROM premise_votes').get().voter_role,'owner');
+  sqlite.prepare("UPDATE memberships SET role='family' WHERE id=17").run();assert.equal(sqlite.prepare('PRAGMA foreign_key_check').all().length,0);
+ }finally{sqlite.close();}
 });

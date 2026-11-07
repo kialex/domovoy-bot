@@ -76,12 +76,12 @@ async function showUnit(env:Env,uid:number,pid:number,showMembers=false,page=0) 
   const lines=rows.slice(0,8).map(m=>`${m.role==='owner'?'🔑':'👤'} ${m.name} · ${roleLabel(m.role)} · ${statusLabel[m.status]}`);
   // Other members' phones never appear in this view.
   const buttons:Button[][]=[];
-  if(canManage)for(const m of rows.slice(0,8)){if(m.user_id!==uid&&(m.role==='tenant'||admin))buttons.push([{text:`Вимкнути доступ: ${m.name}`.slice(0,60),callback_data:`unit:askremove:${m.membership_id}:${m.version}`}]);}
+  if(canManage)for(const m of rows.slice(0,8)){if(m.user_id!==uid&&(m.role!=='owner'||admin))buttons.push([{text:`Вимкнути доступ: ${m.name}`.slice(0,60),callback_data:`unit:askremove:${m.membership_id}:${m.version}`}]);}
   const navigation:Button[]=[];
   if(page>0)navigation.push({text:'← Назад',callback_data:`unit:members:${pid}:${page-1}`});
   if(rows.length>8)navigation.push({text:'Далі →',callback_data:`unit:members:${pid}:${page+1}`});
   if(navigation.length)buttons.push(navigation);
-  await sendHtml(env,uid,`👥 <b>${escapeHtml(premiseLabel(any))}</b>\n\n${escapeHtml(lines.join('\n'))}\n\n${canManage?'Власник може вимкнути доступ орендарю. Іншого власника може від’єднати тільки адміністратор.':'Керувати доступом може підтверджений власник.'}`,buttons);
+  await sendHtml(env,uid,`👥 <b>${escapeHtml(premiseLabel(any))}</b>\n\n${escapeHtml(lines.join('\n'))}\n\n${canManage?'Власник може вимкнути доступ орендарю або члену сім’ї. Іншого власника може від’єднати тільки адміністратор.':'Керувати доступом може підтверджений власник.'}`,buttons);
 }
 export async function residentCallback(env:Env,q:Callback):Promise<boolean> {
   if(!q.data?.startsWith('resident:')&&!q.data?.startsWith('unit:'))return false;
@@ -118,7 +118,7 @@ export async function residentCallback(env:Env,q:Callback):Promise<boolean> {
   if(action!=='remove'){await answer(env,q.id,'Недоступна дія.');return true;}
   await env.HOME_DB.batch([
     env.HOME_DB.prepare(`UPDATE memberships SET status='revoked',version=version+1,reviewed_by=?,reviewed_at=unixepoch() WHERE id=? AND version=? AND status IN ('pending','approved')
-      AND (?=1 OR (role='tenant' AND EXISTS(SELECT 1 FROM memberships own WHERE own.user_id=? AND own.premise_id=memberships.premise_id AND own.role='owner' AND own.status='approved')))`).bind(q.from.id,id,target.version,Number(admin),q.from.id),
+      AND (?=1 OR (role IN ('tenant','family') AND EXISTS(SELECT 1 FROM memberships own WHERE own.user_id=? AND own.premise_id=memberships.premise_id AND own.role='owner' AND own.status='approved')))`).bind(q.from.id,id,target.version,Number(admin),q.from.id),
 
     env.HOME_DB.prepare("INSERT INTO membership_audit(actor_id,membership_id,action) SELECT ?,id,'revoke' FROM memberships WHERE id=? AND status='revoked' AND version=?").bind(q.from.id,id,target.version+1),
   ]);

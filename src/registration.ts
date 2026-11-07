@@ -1,7 +1,7 @@
 import { resolveJoin } from './join-requests.ts';
 import type { Button, Callback, Env, Message } from './env.ts';
 import { connectedGroups, getGroup, groupId, isConnected } from './groups.ts';
-import { answer, send, sendHtml } from './telegram.ts';
+import { answer, send, sendHtml, telegram } from './telegram.ts';
 import { escapeHtml } from './presentation.ts';
 import { apartmentNumber, positiveId, ukrainianPhone } from './validation.ts';
 import { commercialKey, entranceForApartment, membershipSelect, premiseLabel, roleLabel, validFloor } from './premises.ts';
@@ -9,7 +9,7 @@ import type { Membership, Premise } from './premises.ts';
 
 interface Form {
   kind?: 'apartment' | 'commercial'; number?: string; business_name?: string; entrance?: number; floor?: number;
-  ask_name?: boolean; ask_phone?: boolean; name?: string; phone?: string; role?: 'owner' | 'tenant'; poll_id?: number;
+  ask_name?: boolean; ask_phone?: boolean; name?: string; phone?: string; role?: 'owner' | 'tenant' | 'family'; poll_id?: number;
 }
 interface Session { user_id: number; chat_id: number; token: string; step: string; data: string }
 const token = () => crypto.randomUUID().replace(/-/g, '').slice(0, 12);
@@ -71,11 +71,11 @@ async function showForm(env: Env, s: Session) {
     floor: `Напишіть ваш поверх (${min}–${max}).`,
     name: 'Напишіть ім’я та прізвище.',
     phone: 'Напишіть номер телефону.',
-    role: 'Ви власник чи орендар?',
+    role: 'Оберіть вашу роль.',
   };
   const buttons: Button[][] = [];
   if (s.step === 'kind') buttons.push([{ text: '🏠 Квартира', callback_data: `reg:kind:${s.token}:apartment` }, { text: '🏪 Комерція', callback_data: `reg:kind:${s.token}:commercial` }]);
-  if (s.step === 'role') buttons.push([{ text: '🔑 Власник', callback_data: `reg:role:${s.token}:owner` }, { text: '🏠 Орендар', callback_data: `reg:role:${s.token}:tenant` }]);
+  if (s.step === 'role') buttons.push([{ text: '🔑 Власник', callback_data: `reg:role:${s.token}:owner` }, { text: '🏠 Орендар', callback_data: `reg:role:${s.token}:tenant` }, ...(f.kind==='apartment'?[{text:'Член сім’ї',callback_data:`reg:role:${s.token}:family`}]:[])]);
   buttons.push([...(i>0?[{text:'← Назад',callback_data:`reg:back:${s.token}`}]:[]),...cancel(s)]);
   return plainCard(env, s.user_id, prompts[s.step], buttons);
 }
@@ -203,13 +203,20 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
     f = { kind: extra as Form['kind'], poll_id: f.poll_id, ...await contactDefaults(env,s.user_id) };
     await answer(env,q.id,''); await save(env,s,f,f.kind === 'commercial' ? 'business_name' : 'number'); return true;
   }
-  if (action === 'role' && s.step === 'role' && ['owner','tenant'].includes(extra)) {
+  if (action === 'role' && s.step === 'role' && (f.kind==='apartment'?['owner','tenant','family']:['owner','tenant']).includes(extra)) {
     f.role = extra as Form['role']; await answer(env,q.id,''); await save(env,s,f,'review'); return true;
   }
   const validProperty = f.kind === 'commercial' ? !!f.business_name && f.number === commercialKey(f.business_name)
     : !!f.number && !!f.entrance && f.floor !== undefined && entranceForApartment(f.number) === f.entrance && validFloor('apartment',f.entrance,String(f.floor)) !== null;
   if (action !== 'submit' || s.step !== 'review' || !f.kind || !validProperty || !f.name || !ukrainianPhone(f.phone || '') || !f.role) {
     await registrationNotice(env,q,'Натисніть кнопку під останнім запитанням внизу чату.'); return true;
+  }
+  let inGroup:boolean;
+  try{
+    const member=await telegram<{status:string;is_member?:boolean}>(env,'getChatMember',{chat_id:s.chat_id,user_id:s.user_id});
+    inGroup=['member','administrator','creator'].includes(member.status)||(member.status==='restricted'&&member.is_member===true);
+  }catch{
+    await answer(env,q.id,'');await plainCard(env,s.user_id,'Не вдалося перевірити участь у групі. Натисніть «Надіслати заявку» ще раз.');return true;
   }
   let p = await env.HOME_DB.prepare('SELECT * FROM premises WHERE chat_id=? AND kind=? AND number=?').bind(s.chat_id,f.kind,f.number!).first<Premise>();
   if (!p && f.kind === 'commercial') {
@@ -225,18 +232,30 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
   }
   if (!p) throw new Error('Premise creation failed');
   const existing = await env.HOME_DB.prepare('SELECT status FROM memberships WHERE user_id=? AND premise_id=?').bind(s.user_id,p.id).first<{status:string}>();
-  if (existing && ['approved','pending'].includes(existing.status)) {
+  if (existing && (existing.status==='approved'||(existing.status==='pending'&&!inGroup))) {
     await env.HOME_DB.prepare('DELETE FROM sessions WHERE user_id=? AND token=?').bind(s.user_id,s.token).run();
     await registrationNotice(env,q,existing.status === 'approved' ? 'Це приміщення вже додано. Відкрийте «Мої приміщення».' : 'Заявка на це приміщення вже очікує перевірки.'); return true;
   }
+  if(inGroup&&p.kind==='apartment'&&p.floor!==null&&p.floor!==f.floor){
+    const verified=await env.HOME_DB.prepare("SELECT id FROM memberships WHERE premise_id=? AND status='approved' LIMIT 1").bind(p.id).first();
+    if(verified){await answer(env,q.id,'');await plainCard(env,s.user_id,`Для цієї квартири вказано поверх ${p.floor}. Перевірте дані та заповніть заявку заново.`);return true;}
+  }
+  const status=inGroup?'approved':'pending';
   await env.HOME_DB.batch([
     env.HOME_DB.prepare('INSERT INTO profiles(user_id,name,phone) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET name=excluded.name,phone=excluded.phone,updated_at=unixepoch()').bind(s.user_id,f.name,ukrainianPhone(f.phone!)!),
-    env.HOME_DB.prepare(`INSERT INTO memberships(user_id,premise_id,role,status,application_token,details) VALUES (?,?,?,'pending',?,?)
-      ON CONFLICT(user_id,premise_id) DO UPDATE SET role=excluded.role,status='pending',application_token=excluded.application_token,details=excluded.details,version=memberships.version+1,reviewed_by=NULL,reviewed_at=NULL
-      WHERE memberships.status IN ('rejected','revoked')`).bind(s.user_id,p.id,f.role,s.token,JSON.stringify(f)),
+    env.HOME_DB.prepare(`INSERT INTO memberships(user_id,premise_id,role,status,application_token,details) VALUES (?,?,?,?,?,?)
+      ON CONFLICT(user_id,premise_id) DO UPDATE SET role=excluded.role,status=excluded.status,application_token=excluded.application_token,details=excluded.details,version=memberships.version+1,reviewed_by=NULL,reviewed_at=NULL
+      WHERE memberships.status IN ('rejected','revoked') OR (memberships.status='pending' AND excluded.status='approved')`).bind(s.user_id,p.id,f.role,status,s.token,JSON.stringify(f)),
+    ...(inGroup&&f.floor!==undefined?[env.HOME_DB.prepare("UPDATE premises SET floor=?,entrance=? WHERE id=? AND NOT EXISTS (SELECT 1 FROM memberships WHERE premise_id=? AND status='approved' AND user_id!=?)").bind(f.floor,f.entrance!,p.id,p.id,s.user_id)]:[]),
+    ...(inGroup?[env.HOME_DB.prepare("INSERT INTO membership_audit(actor_id,membership_id,action) SELECT ?,id,'auto_approve_group_member' FROM memberships WHERE user_id=? AND premise_id=? AND application_token=?").bind(s.user_id,s.user_id,p.id,s.token)]:[]),
     env.HOME_DB.prepare('DELETE FROM sessions WHERE user_id=? AND token=?').bind(s.user_id,s.token),
   ]);
   await answer(env,q.id,'');
+  if(inGroup){
+    await plainCard(env,s.user_id,`✅ Реєстрацію завершено\n${premiseLabel(p)}\nТепер можна голосувати.`);
+    if(String(s.user_id)!==env.ADMIN_TELEGRAM_USER_ID){const {residentMenu}=await import('./resident-menu.ts');await residentMenu(env,s.user_id);}
+    return true;
+  }
   await plainCard(env,s.user_id,`✅ Заявку надіслано\n${premiseLabel(p)}\n\nАдміністратор перевірить дані. Ми повідомимо тут про рішення. `);
   const membership = await env.HOME_DB.prepare(`${membershipSelect} WHERE m.user_id=? AND m.premise_id=?`).bind(s.user_id,p.id).first<Membership>();
   if (membership) await notifyApplication(env,membership);

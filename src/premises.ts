@@ -7,7 +7,7 @@ export interface Premise {
   number_start: number; number_end: number;
 }
 export interface Membership extends Premise {
-  group_title?: string; membership_id: number; user_id: number; role: 'owner' | 'tenant'; status: string;
+  group_title?: string; membership_id: number; user_id: number; role: 'owner' | 'tenant' | 'family'; status: string;
   version: number; name: string; phone: string; application_token: string; details: string;
 }
 export const membershipSelect = `SELECT p.*,m.id AS membership_id,m.user_id,m.role,m.status,m.version,
@@ -29,7 +29,7 @@ export function validFloor(kind: string, entrance: number, value: string): numbe
   return floor >= minimum && floor <= maximum ? floor : null;
 }
 export const premiseLabel = (p: Pick<Premise, 'kind' | 'number'> & Partial<Pick<Premise, 'business_name'>>) => p.kind === 'apartment' ? `Квартира ${p.number}` : `🏪 ${p.business_name || 'Комерція'}`;
-export const roleLabel = (role: string) => role === 'owner' ? 'Власник' : 'Орендар';
+export const roleLabel = (role: string) => ({owner:'Власник',tenant:'Орендар',family:'Член сім’ї'} as Record<string,string>)[role] || 'Мешканець';
 export async function ownMemberships(env: Env, uid: number, chatId?: number, approvedOnly = false) {
   return (await env.HOME_DB.prepare(`${membershipSelect.replace('SELECT p.*', 'SELECT g.title AS group_title,p.*')} JOIN groups g ON g.chat_id=p.chat_id WHERE m.user_id=? AND g.status='approved' AND g.bot_present=1 ${chatId ? 'AND p.chat_id=?' : ''} ${approvedOnly ? "AND m.status='approved' AND u.phone GLOB '+380[1-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'" : "AND m.status IN ('pending','approved')"} ORDER BY p.chat_id,p.kind,p.number_start`)
     .bind(...(chatId ? [uid, chatId] : [uid])).all<Membership>()).results;

@@ -673,13 +673,13 @@ test('registration buttons acknowledge silently and explain stale choices in the
 test('registration asks each field briefly without repeated headers or duplicate error cards',async()=>{
  const h=harness();try{
   await h.msg(2,'/start');const token=h.form(2).token;
-  assert.equal(h.calls.at(-1).text.trim(),'<b>Що реєструємо?</b>');
-  await h.cb(2,`reg:kind:${token}:apartment`);assert.equal(h.calls.at(-1).text.trim(),'<b>Напишіть номер квартири.</b>');
+  assert.equal(h.calls.at(-1).text.trim(),'Що реєструємо?');
+  await h.cb(2,`reg:kind:${token}:apartment`);assert.equal(h.calls.at(-1).text.trim(),'Напишіть номер квартири.');
   await h.msg(2,'25');const before=h.calls.filter(c=>c.method==='sendMessage').length;
   await h.msg(2,'0');assert.equal(h.calls.filter(c=>c.method==='sendMessage').length,before+1);assert.equal(h.form(2).step,'floor');
-  await h.msg(2,'2');assert.equal(h.calls.at(-1).text.trim(),'<b>Напишіть ім’я та прізвище.</b>');
-  await h.msg(2,'Olena Koval');assert.equal(h.calls.at(-1).text.trim(),'<b>Напишіть номер телефону.</b>');
-  await h.msg(2,'0671234567');assert.equal(h.calls.at(-1).text.trim(),'<b>Ви власник чи орендар?</b>');
+  await h.msg(2,'2');assert.equal(h.calls.at(-1).text.trim(),'Напишіть ім’я та прізвище.');
+  await h.msg(2,'Olena Koval');assert.equal(h.calls.at(-1).text.trim(),'Напишіть номер телефону.');
+  await h.msg(2,'0671234567');assert.equal(h.calls.at(-1).text.trim(),'Ви власник чи орендар?');
  }finally{h.close();}
 });
 
@@ -789,5 +789,17 @@ test('welcome failure does not undo entry and retries without approving the requ
   h.apiOverride=(method,body)=>method==='sendMessage'&&body.text?.startsWith('🏡 Вітаємо у')&&fail?Response.json({ok:false},{status:403}):undefined;
   await requestJoin(h,2);let j=h.sqlite.prepare('SELECT * FROM join_requests').get();assert.equal(j.status,'approved');assert.equal(j.welcomed,0);
   fail=false;await retryJoins(h.env);j=h.sqlite.prepare('SELECT * FROM join_requests').get();assert.equal(j.welcomed,1);assert.equal(h.calls.filter(c=>c.method==='approveChatJoinRequest').length,1);
+ }finally{h.close();}
+});
+
+test('join invitation explains registration and admin approval; form prompts stay compact',async()=>{
+ const h=harness();try{
+  const j=await requestJoin(h,2);const greeting=h.calls.at(-1);
+  assert.match(greeting.text,/Вітаємо! Це HomeBot/);assert.match(greeting.text,/коротку реєстрацію/);assert.match(greeting.text,/адміністратор перевірить дані та прийме вашу заявку/);
+  assert.equal(greeting.reply_markup.inline_keyboard[0][0].text,'Почати реєстрацію');
+  await h.cb(2,`join:start:${j.token}`);const token=h.form(2).token;
+  await h.cb(2,`reg:kind:${token}:apartment`);const question=h.calls.at(-1);
+  assert.equal(question.text,'Напишіть номер квартири.');assert.equal(question.parse_mode,undefined);
+  assert.equal(question.reply_markup.inline_keyboard.length,1);assert.equal(question.reply_markup.inline_keyboard[0].length,2);
  }finally{h.close();}
 });

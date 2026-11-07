@@ -1,7 +1,7 @@
 import { resolveJoin } from './join-requests.ts';
 import type { Button, Callback, Env, Message } from './env.ts';
 import { connectedGroups, getGroup, groupId, isConnected } from './groups.ts';
-import { answer, sendHtml } from './telegram.ts';
+import { answer, send, sendHtml } from './telegram.ts';
 import { escapeHtml } from './presentation.ts';
 import { apartmentNumber, positiveId, ukrainianPhone } from './validation.ts';
 import { commercialKey, entranceForApartment, membershipSelect, premiseLabel, roleLabel, validFloor } from './premises.ts';
@@ -43,9 +43,10 @@ async function registrationNotice(env:Env,q:Callback,text:string) {
   await answer(env,q.id,'');
   if(q.message?.chat.type==='private'&&q.message.chat.id===q.from.id)await plainCard(env,q.from.id,text);
 }
-const cancel = (s: Session): Button[] => [{ text: '✕ Скасувати', callback_data: `reg:cancel:${s.token}` }];
+const cancel = (s: Session): Button[] => [{ text: 'Скасувати', callback_data: `reg:cancel:${s.token}` }];
 function plainCard(env: Env, uid: number | string, text: string, buttons?: Button[][]) {
   const [heading,...rest] = text.split('\n');
+  if(!rest.length)return send(env,uid,heading,buttons);
   return sendHtml(env, uid, `<b>${escapeHtml(heading)}</b>\n${escapeHtml(rest.join('\n'))}`, buttons);
 }
 function description(f: Form) {
@@ -58,7 +59,7 @@ async function showForm(env: Env, s: Session) {
   if (!isConnected(group)) return plainCard(env, s.user_id, 'Групу від’єднано\nПочніть реєстрацію з підключеної групи.', [cancel(s)]);
   if (s.step === 'review') return plainCard(env, s.user_id, `📋 Перевірте заявку\n🏘 ${group.title}\n\n${description(f)}\n\nНадсилаючи заявку, ви погоджуєтесь: ім’я та роль бачать мешканці приміщення, телефон — адміністратор.`, [
     [{ text: '✅ Надіслати заявку', callback_data: `reg:submit:${s.token}` }],
-    [{ text: '✏️ Заповнити заново', callback_data: `reg:restart:${s.token}` }], cancel(s),
+    [{ text: '✏️ Заповнити заново', callback_data: `reg:restart:${s.token}` }, ...cancel(s)],
   ]);
   const steps = sequence(f); const i = steps.indexOf(s.step);
   const min = f.entrance === 1 ? 2 : 1;
@@ -75,8 +76,7 @@ async function showForm(env: Env, s: Session) {
   const buttons: Button[][] = [];
   if (s.step === 'kind') buttons.push([{ text: '🏠 Квартира', callback_data: `reg:kind:${s.token}:apartment` }, { text: '🏪 Комерція', callback_data: `reg:kind:${s.token}:commercial` }]);
   if (s.step === 'role') buttons.push([{ text: '🔑 Власник', callback_data: `reg:role:${s.token}:owner` }, { text: '🏠 Орендар', callback_data: `reg:role:${s.token}:tenant` }]);
-  if (i > 0) buttons.push([{ text: '← Назад', callback_data: `reg:back:${s.token}` }]);
-  buttons.push(cancel(s));
+  buttons.push([...(i>0?[{text:'← Назад',callback_data:`reg:back:${s.token}`}]:[]),...cancel(s)]);
   return plainCard(env, s.user_id, prompts[s.step], buttons);
 }
 async function save(env: Env, s: Session, f: Form, step: string) {

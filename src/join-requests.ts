@@ -58,7 +58,7 @@ export async function joinRequest(env:Env,r:ChatJoinRequest,updateId:number) {
  if(row.notified)return;
  try{
   const group=await getGroup(env,r.chat.id);
-  await send(env,r.from.id,`Щоб вступити до «${group?.title}», зареєструйтеся.`,[[{text:'Зареєструватися',callback_data:`join:start:${row.token}`}]]);
+  await send(env,r.from.id,`🏡 Вітаємо! Це HomeBot — помічник мешканців будинку.\n\nЩоб вступити до групи «${group?.title}», пройдіть коротку реєстрацію. Після цього дочекайтеся, поки адміністратор перевірить дані та прийме вашу заявку.\n\nЧерез бот можна голосувати, переглядати свої дані та мешканців квартири.`,[[{text:'Почати реєстрацію',callback_data:`join:start:${row.token}`}]]);
   await env.HOME_DB.prepare('UPDATE join_requests SET notified=1 WHERE token=?').bind(row.token).run();
  }catch{
   await send(env,env.ADMIN_TELEGRAM_USER_ID,'Не вдалося надіслати реєстрацію новому учаснику. Попросіть його відкрити бота та натиснути «Почати».');

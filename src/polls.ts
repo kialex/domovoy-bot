@@ -15,7 +15,7 @@ export async function createPoll(env: Env, input: string | { question: string; o
   if (!chatId) {
     const groups = await connectedGroups(env);
     if (groups.length !== 1) {
-      await send(env, env.ADMIN_TELEGRAM_USER_ID, 'Оберіть групу через покрокове створення голосування.', [[{ text: 'Створити голосування', callback_data: 'admin:newpoll' }]]);
+      await send(env, env.ADMIN_TELEGRAM_USER_ID, 'Оберіть групу через покрокове створення голосування.');
       return false;
     }
     chatId = groups[0].chat_id;

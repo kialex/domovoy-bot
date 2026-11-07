@@ -16,19 +16,17 @@ export async function pollControls(env:Env,id:number) {
   if(!p||p.status==='draft')return send(env,env.ADMIN_TELEGRAM_USER_ID,'Голосування не знайдено.');
   const buttons:Button[][]=[[{text:'📊 Звіт',callback_data:`pollctl:results:${id}`}]];
   if(p.status==='open')buttons.push([{text:'⬆️ Підняти зараз',callback_data:`pollctl:raise:${id}`}],[{text:'🏁 Завершити голосування',callback_data:`pollctl:askclose:${id}`}]);
-  buttons.push([{text:'← Мої голосування',callback_data:'pollctl:list:0'},{text:'🏠 Головне меню',callback_data:'resident:menu:0'}]);
   return sendHtml(env,env.ADMIN_TELEGRAM_USER_ID,`🗳 <b>Голосування</b>\n\n${escapeHtml(p.question)}\n\nСтатус: ${p.status==='open'?'відкрите':'завершено'}\nАвтопідняття: ${escapeHtml(intervalLabel(p.repost_interval))}\n📅 Строк: ${p.ends_at?kyivDate(p.ends_at)+' (Київ)':'без строку'}\n\nПідняття публікує нове повідомлення зі збереженими голосами й прибирає старе.`,buttons);
 }
 export async function adminPollList(env:Env,page=0,status='open') {
   status=status==='closed'?'closed':'open';
+  await telegram(env,'sendMessage',{chat_id:env.ADMIN_TELEGRAM_USER_ID,text:status==='closed'?'📁 Завершені голосування':'🗳 Активні голосування',reply_markup:{keyboard:[[{text:'🗳 Активні голосування'},{text:'🏁 Завершені голосування'}],[{text:'🗳 Створити голосування'}],[{text:'🏠 Головне меню'}]],resize_keyboard:true,is_persistent:true,one_time_keyboard:false}});
   const {results}=await env.HOME_DB.prepare("SELECT id,question FROM polls WHERE status=? ORDER BY id DESC LIMIT 9 OFFSET ?").bind(status,page*8).all<{id:number;question:string}>();
   const buttons:Button[][]=results.slice(0,8).map(p=>[{text:`${p.question}`.slice(0,60),callback_data:`pollctl:show:${p.id}`}]);
-  buttons.unshift([{text:status==='open'?'✓ Активні':'Активні',callback_data:'pollctl:list:0:open'},{text:status==='closed'?'✓ Завершені':'Завершені',callback_data:'pollctl:list:0:closed'}]);
   const nav:Button[]=[];
   if(page>0)nav.push({text:'← Назад',callback_data:`pollctl:list:${page-1}:${status}`});
   if(results.length>8)nav.push({text:'Далі →',callback_data:`pollctl:list:${page+1}:${status}`});
   if(nav.length)buttons.push(nav);
-  buttons.push([{text:'🏠 Головне меню',callback_data:'resident:menu:0'}]);
   return send(env,env.ADMIN_TELEGRAM_USER_ID,results.length?'🗳 Оберіть голосування для перегляду звіту та керування.':status==='closed'?'Завершених голосувань немає.':'Відкритих голосувань немає.',buttons);
 }
 function currentLink(p:RepostPoll) {

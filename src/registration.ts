@@ -98,7 +98,7 @@ export async function startRegistration(env: Env, uid: number, payload?: string)
 }
 export async function registrationMessage(env: Env, m: Message) {
   let s = await env.HOME_DB.prepare('SELECT * FROM sessions WHERE user_id=?').bind(m.from!.id).first<Session>();
-  if (!s) return plainCard(env,m.from!.id,'🏡 Вітаємо!\nОберіть дію нижче або відкрийте голосування у групі будинку.',[[{text:'➕ Додати приміщення',callback_data:'resident:add:0'}],[{text:'🏠 Відкрити меню',callback_data:'resident:menu:0'}]]);
+  if (!s) {const {residentMenu}=await import('./resident-menu.ts');const {adminMenu}=await import('./poll-wizard.ts');return String(m.from!.id)===env.ADMIN_TELEGRAM_USER_ID?adminMenu(env):residentMenu(env,m.from!.id);}
   s = await normalizeSession(env,s);
   if (!isConnected(await getGroup(env,s.chat_id))) return showForm(env,s);
   const f = JSON.parse(s.data) as Form; const value = (m.text || '').trim();
@@ -159,7 +159,8 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
     ]);
     await answer(env,q.id,'Рішення збережено.');
     if (action === 'approve') await plainCard(env,q.from.id,`✅ Доступ надано\n${premiseLabel(m)} · ${m.name}`,[[{text:'👥 Користувачі приміщення',callback_data:`unit:members:${m.id}:0`}]]);
-    await plainCard(env,m.user_id,action === 'approve' ? `🎉 Доступ підтверджено\n${premiseLabel(m)}\n\nВи можете голосувати від цього приміщення. Відкрийте меню кнопкою нижче, щоб подивитися свої дані та список мешканців.` : `Заявку відхилено\n${premiseLabel(m)}\n\nУточніть дані з адміністратором і подайте заявку знову.`,[[{text:'🏠 Відкрити меню',callback_data:'resident:menu:0'}]]);
+    await plainCard(env,m.user_id,action === 'approve' ? `🎉 Доступ підтверджено\n${premiseLabel(m)}\n\nВи можете голосувати від цього приміщення. Свої дані та список мешканців можна переглянути через клавіатуру внизу.` : `Заявку відхилено\n${premiseLabel(m)}\n\nУточніть дані з адміністратором і подайте заявку знову.`);
+    if(String(m.user_id)!==env.ADMIN_TELEGRAM_USER_ID){const {residentMenu}=await import('./resident-menu.ts');await residentMenu(env,m.user_id);}
     return true;
   }
   let s = await env.HOME_DB.prepare('SELECT * FROM sessions WHERE user_id=? AND token=?').bind(q.from.id,value || '').first<Session>();

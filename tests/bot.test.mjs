@@ -149,7 +149,7 @@ test('one premise vote stays in group, live counts update, other resident cannot
     assert.match(h.calls.at(-1).text,/Person 2/);assert.match(h.calls.at(-1).text,/Власник/);assert.equal(h.calls.at(-1).method,'answerCallbackQuery');
     await cast(h,2,p,1);assert.equal(currentVotes(h)[0].option_index,1,'only the original author may change their vote');
     await closePoll(h,p.id);await cast(h,2,p,0);assert.equal(currentVotes(h)[0].option_index,1);
-    const outcome=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).at(-1);assert.match(outcome.text,/ГОЛОСУВАННЯ ЗАВЕРШЕНО/);assert.equal(outcome.reply_markup,undefined);
+    const outcome=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).at(-1);assert.match(outcome.text,/Підсумки голосування/);assert.equal(outcome.reply_markup,undefined);
     assert.ok(h.calls.some(c=>c.method==='deleteMessage'&&c.message_id===p.message_id));
   }finally{h.close();}
 });
@@ -472,7 +472,7 @@ test('refresh follows a reposted message and repairs an open card if the poll cl
     };
     await refreshPoll(h.env,p.id);assert.equal(h.calls.filter(c=>c.method==='editMessageText').at(-1).message_id,777777);
     h.apiOverride=async(method)=>{if(method==='editMessageText'){h.sqlite.prepare("UPDATE polls SET status='closed' WHERE id=?").run(p.id);h.apiOverride=null;}return null;};
-    await refreshPoll(h.env,p.id);const last=h.calls.filter(c=>c.method==='editMessageText').at(-1);assert.match(last.text,/ГОЛОСУВАННЯ ЗАВЕРШЕНО/);assert.deepEqual(last.reply_markup.inline_keyboard,[]);
+    await refreshPoll(h.env,p.id);const last=h.calls.filter(c=>c.method==='editMessageText').at(-1);assert.match(last.text,/Підсумки голосування/);assert.deepEqual(last.reply_markup.inline_keyboard,[]);
   }finally{h.close();}
 });
 
@@ -513,7 +513,7 @@ test('expired votes are rejected immediately; scheduler posts one compact outcom
     const done=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(p.id);assert.equal(done.status,'closed');assert.equal(done.next_repost_at,null);assert.ok(done.result_message_id);assert.equal(done.message_id,done.result_message_id);
     const actions=h.calls.slice(start);const outcomeIndex=actions.findIndex(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id);const deleteIndex=actions.findIndex(c=>c.method==='deleteMessage'&&c.message_id===p.message_id);
     assert.ok(outcomeIndex>=0&&deleteIndex>outcomeIndex);const outcome=actions[outcomeIndex];assert.equal(outcome.reply_markup,undefined);
-    assert.ok(outcome.text.includes(`<code>━━━━━━━━━━</code> <b>Yes — 1 · 100%</b>`));assert.match(outcome.text,/Найбільше голосів/);assert.match(outcome.text,/Київ/);assert.ok(!outcome.text.includes('Person 2'));
+    assert.ok(outcome.text.includes(`<b>1. Yes</b>\n<code>▰▰▰▰▰▰▰▰▰▰</code>  1 голос · <b>100%</b>`));assert.match(outcome.text,/Найбільше голосів/);assert.match(outcome.text,/Київ/);assert.ok(!outcome.text.includes('Person 2'));
     const before=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length;
     await scheduledReposts(h.env);await closePoll(h,p.id);assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length,before);
   }finally{h.close();}
@@ -534,7 +534,7 @@ test('undeletable voting card is replaced with final text and no buttons',async(
   const {finishPoll}=await import('../src/poll-finishing.ts');const h=harness();try{
     const p=await poll(h);h.apiOverride=async(method,body)=>method==='deleteMessage'&&body.message_id===p.message_id?Response.json({ok:false,description:"Bad Request: message can't be deleted"},{status:400}):null;
     await finishPoll(h.env,p.id);const old=h.calls.filter(c=>c.method==='editMessageText'&&c.message_id===p.message_id).at(-1);
-    assert.match(old.text,/ГОЛОСУВАННЯ ЗАВЕРШЕНО/);assert.deepEqual(old.reply_markup.inline_keyboard,[]);assert.match(old.text,/Голосів не подано/);
+    assert.match(old.text,/Підсумки голосування/);assert.deepEqual(old.reply_markup.inline_keyboard,[]);assert.match(old.text,/Голосів не подано/);
   }finally{h.close();}
 });
 
@@ -550,7 +550,7 @@ test('compact final card handles empty polls, ties, exact percentages and Kyiv t
   const {kyivDate}=await import('../src/presentation.ts');const until=Date.UTC(2026,10,12,17)/1000;
   assert.match(kyivDate(until),/19:00/);
   const active=pollCard(1,'Question',['Yes','No'],new Map(),false,{endsAt:until,now:until-5*86400});assert.match(active,/Залишилось: 5 дн/);
-  const tied=pollCard(1,'Question',['Yes','No'],new Map([[0,1],[1,1]]),true,{closedAt:until});assert.match(tied,/Однакова кількість голосів/);assert.ok(tied.includes('Yes — 1 · 50%'));
+  const tied=pollCard(1,'Question',['Yes','No'],new Map([[0,1],[1,1]]),true,{closedAt:until});assert.match(tied,/Однакова кількість голосів/);assert.ok(tied.includes('<b>1. Yes</b>\n<code>▰▰▰▰▰▱▱▱▱▱</code>  1 голос · <b>50%</b>'));
   assert.ok(!tied.includes('Найбільше голосів'));
   const empty=pollCard(1,'Question',['Yes','No'],new Map(),true,{closedAt:until});assert.match(empty,/Голосів не подано/);assert.ok(!empty.includes('NaN'));
 });
@@ -592,7 +592,7 @@ test('poll cards use ten-segment text bars and omit internal poll numbers',()=>{
   const text=pollCard(987,'Question',['Yes','No'],new Map([[0,1],[1,1]]),closed);
   assert.ok(!text.includes('987'));assert.ok(!text.includes('№'));
   assert.ok(!text.includes('🟩'));assert.ok(!text.includes('⬜'));
-  assert.equal(text.split('<code>━━━━━─────</code>').length-1,2);
+  assert.equal(text.split('<code>▰▰▰▰▰▱▱▱▱▱</code>').length-1,2);
   assert.ok(text.includes('\n\n'));
  }
 });
@@ -628,4 +628,28 @@ test('poll deletion is private, confirmed, closed-only and removes dependent dat
   assert.equal(h.member(2,'25').status,'approved');
   await h.cb(1,`pollctl:delete:${p.id}:${valid}`);assert.ok(!exists());
  }finally{h.close();}
+});
+
+test('section navigation stays on the bottom keyboard while messages contain record actions',async()=>{
+ const h=harness();try{
+  await h.msg(1,'📋 Мої голосування');
+  const keyboard=h.calls.findLast(c=>c.reply_markup?.keyboard).reply_markup.keyboard.flat().map(b=>b.text);
+  assert.ok(keyboard.includes('🏠 Головне меню'));assert.ok(keyboard.includes('🏁 Завершені голосування'));
+  await h.msg(1,'🏁 Завершені голосування');assert.match(h.calls.at(-1).text,/Завершених/);
+  await h.msg(1,'🏠 Головне меню');assert.ok(h.calls.at(-1).reply_markup.keyboard.flat().some(b=>b.text==='📋 Мої голосування'));
+  const p=await poll(h);await h.cb(1,`pollctl:show:${p.id}`);await h.cb(1,`pollctl:results:${p.id}`);
+  await register(h,2);await h.msg(2,'👤 Мої дані');await h.msg(2,'🏠 Мої приміщення');
+  for(const call of h.calls){for(const b of call.reply_markup?.inline_keyboard?.flat()||[]){
+   assert.ok(!['resident:menu:0','resident:units:0','admin:groups','admin:newpoll'].includes(b.callback_data));
+   assert.ok(!/Головне меню|Мої голосування|Відкрити меню/.test(b.text));
+  }}
+ }finally{h.close();}
+});
+
+test('mobile result separates long labels from a bounded bar and compact Kyiv date',()=>{
+ const option='Залишити та обговорити на наступних зборах 😅';
+ const text=pollCard(1,'Question',[option,'No'],new Map([[0,1]]),true,{closedAt:Date.UTC(2026,10,7,15,45)/1000});
+ assert.ok(text.includes(`<b>1. ${option}</b>\n<code>`));
+ assert.ok(text.includes('<code>▱▱▱▱▱▱▱▱▱▱</code>  0 голосів · <b>0%</b>'));
+ assert.match(text,/07\.11\.2026,? 17:45/);
 });

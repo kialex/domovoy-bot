@@ -48,7 +48,7 @@ export async function requestPollWizard(env: Env, updateId: number) {
 }
 export async function startPollWizard(env: Env, updateId: number) {
   const groups = await connectedGroups(env);
-  if (!groups.length) return send(env, env.ADMIN_TELEGRAM_USER_ID, 'Спочатку підключіть групу: додайте бота до неї та підтвердіть заявку в особистому чаті.', [[{ text: 'Мої групи', callback_data: 'admin:groups' }]]);
+  if (!groups.length) return send(env, env.ADMIN_TELEGRAM_USER_ID, 'Спочатку підключіть групу: додайте бота до неї та підтвердіть заявку в особистому чаті.');
   const token = crypto.randomUUID().slice(0, 8);
   await env.HOME_DB.prepare(`INSERT INTO poll_drafts(user_id,token,source_update_id,step) VALUES (?,?,?,'question')
     ON CONFLICT(user_id) DO UPDATE SET token=excluded.token,source_update_id=excluded.source_update_id,step='question',question=NULL,options='[]',chat_id=NULL,group_version=NULL,repost_interval=NULL,duration_days=NULL`)

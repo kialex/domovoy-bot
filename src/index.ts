@@ -19,6 +19,8 @@ async function message(env: Env, m: Message, updateId: number) {
   const admin = String(m.from.id) === env.ADMIN_TELEGRAM_USER_ID;
   if (admin && (command === '/menu' || text === ADMIN_ACTIONS.menu)) return adminMenu(env);
   if (admin && (text === ADMIN_ACTIONS.polls || command === '/polls')) return adminPollList(env);
+  if (admin && text === '🗳 Активні голосування') return adminPollList(env,0,'open');
+  if (admin && text === '🏁 Завершені голосування') return adminPollList(env,0,'closed');
   if (admin && text === ADMIN_ACTIONS.poll) return requestPollWizard(env, updateId);
   if (admin && text === ADMIN_ACTIONS.pending) return pendingRegistrations(env);
   if (admin && text === ADMIN_ACTIONS.groups) return showGroups(env);

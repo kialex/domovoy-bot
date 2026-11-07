@@ -21,7 +21,7 @@ export async function showOwnData(env: Env, uid: number) {
   const profile = await env.HOME_DB.prepare('SELECT name,phone FROM profiles WHERE user_id=?').bind(uid).first<{name:string;phone:string}>();
   if (!profile) return send(env,uid,'👤 Даних ще немає\nНатисніть «Додати приміщення», щоб пройти реєстрацію.');
   const own = await ownMemberships(env,uid);
-  return sendHtml(env,uid,`👤 <b>Мої дані</b>\n\nІм’я: ${escapeHtml(profile.name)}\nТелефон: ${escapeHtml(profile.phone)}\n\nПриміщень у підключених групах: <b>${own.length}</b>\nІм’я й телефон є спільними для ваших заявок. Роль і доступ перевіряються окремо для кожного приміщення.`,[[{text:RESIDENT_ACTIONS.units,callback_data:'resident:units:0'}]]);
+  return sendHtml(env,uid,`👤 <b>Мої дані</b>\n\nІм’я: ${escapeHtml(profile.name)}\nТелефон: ${escapeHtml(profile.phone)}\n\nПриміщень у підключених групах: <b>${own.length}</b>\nІм’я й телефон є спільними для ваших заявок. Роль і доступ перевіряються окремо для кожного приміщення.`);
 }
 export async function showOwnUnits(env: Env,uid:number,page=0) {
   const rows = await ownMemberships(env,uid);
@@ -33,7 +33,6 @@ export async function showOwnUnits(env: Env,uid:number,page=0) {
   if(page>0)nav.push({text:'← Назад',callback_data:`resident:units:${page-1}`});
   if(rows.length>(page+1)*8)nav.push({text:'Далі →',callback_data:`resident:units:${page+1}`});
   if(nav.length)buttons.push(nav);
-  buttons.push([{text:RESIDENT_ACTIONS.add,callback_data:'resident:add:0'}]);
   return send(env,uid,rows.length?'🏠 Мої приміщення\nОберіть квартиру або комерцію. Доступ і голоси враховуються окремо для кожного приміщення.':'🏠 Ви ще не додали приміщення.',buttons);
 }
 export async function addUnit(env:Env,uid:number,chatId?:number) {

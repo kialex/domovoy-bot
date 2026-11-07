@@ -24,7 +24,6 @@ export async function adminPollReport(env:Env,id:number) {
   }
   const buttons:Button[][]=[];
   if(p.status==='closed')buttons.push([{text:'🗑 Видалити голосування',callback_data:`pollctl:askdelete:${id}`}]);
-  buttons.push([{text:'← Мої голосування',callback_data:`pollctl:list:0:${p.status}`}]);
   let message='';
   for(const block of blocks){if(message.length+block.length+2>3800){await sendHtml(env,env.ADMIN_TELEGRAM_USER_ID,message);message='';}message+=(message?'\n\n':'')+block;}
   return sendHtml(env,env.ADMIN_TELEGRAM_USER_ID,message,buttons);

@@ -53,6 +53,15 @@ function description(f: Form) {
   const property = f.kind === 'commercial' ? `🏪 ${f.business_name}` : `🏠 Квартира ${f.number}\nПід’їзд: ${f.entrance} · Поверх: ${f.floor}`;
   return `${property}\n\n👤 ${f.name}\n📱 ${f.phone}\n🔑 ${roleLabel(f.role || '')}`;
 }
+async function returnToRegistrationPoll(env:Env,uid:number,chatId:number,f:Form) {
+  if(!f.poll_id)return;
+  const poll=await env.HOME_DB.prepare("SELECT chat_id,message_id,status,ends_at FROM polls WHERE id=? AND chat_id=? AND status IN ('open','closed')").bind(f.poll_id,chatId).first<{chat_id:number;message_id:number|null;status:string;ends_at:number|null}>();
+  if(!poll?.message_id||!isConnected(await getGroup(env,chatId)))return;
+  const {pollLink}=await import('./resident-menu.ts');const url=pollLink(chatId,poll.message_id);
+  if(!url)return;
+  const open=poll.status==='open'&&(poll.ends_at===null||poll.ends_at>Math.floor(Date.now()/1000));
+  await send(env,uid,open?'Тепер можна проголосувати.':'Це голосування вже завершено.',[[{text:open?'↗️ Повернутися до голосування':'Переглянути результати',url}]]);
+}
 async function showForm(env: Env, s: Session) {
   const f = JSON.parse(s.data) as Form;
   const group = await getGroup(env, s.chat_id);
@@ -177,6 +186,7 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
     const joined=action==='approve'?await env.HOME_DB.prepare("SELECT token FROM join_requests WHERE user_id=? AND chat_id=? AND status='approved'").bind(m.user_id,m.chat_id).first():null;
     if(!joined)await plainCard(env,m.user_id,action === 'approve' ? `🎉 Доступ підтверджено\n${premiseLabel(m)}\n\nВи можете голосувати від цього приміщення. Свої дані та список мешканців можна переглянути через клавіатуру внизу.` : `Заявку відхилено\n${premiseLabel(m)}\n\nУточніть дані з адміністратором і подайте заявку знову.`);
     if(!joined&&String(m.user_id)!==env.ADMIN_TELEGRAM_USER_ID){const {residentMenu}=await import('./resident-menu.ts');await residentMenu(env,m.user_id);}
+    if(action==='approve')await returnToRegistrationPoll(env,m.user_id,m.chat_id,f);
     return true;
   }
   let s = await env.HOME_DB.prepare('SELECT * FROM sessions WHERE user_id=? AND token=?').bind(q.from.id,value || '').first<Session>();
@@ -234,7 +244,9 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
   const existing = await env.HOME_DB.prepare('SELECT status FROM memberships WHERE user_id=? AND premise_id=?').bind(s.user_id,p.id).first<{status:string}>();
   if (existing && (existing.status==='approved'||(existing.status==='pending'&&!inGroup))) {
     await env.HOME_DB.prepare('DELETE FROM sessions WHERE user_id=? AND token=?').bind(s.user_id,s.token).run();
-    await registrationNotice(env,q,existing.status === 'approved' ? 'Це приміщення вже додано. Відкрийте «Мої приміщення».' : 'Заявка на це приміщення вже очікує перевірки.'); return true;
+    await registrationNotice(env,q,existing.status === 'approved' ? 'Це приміщення вже додано. Відкрийте «Мої приміщення».' : 'Заявка на це приміщення вже очікує перевірки.');
+    if(existing.status==='approved')await returnToRegistrationPoll(env,s.user_id,s.chat_id,f);
+    return true;
   }
   if(inGroup&&p.kind==='apartment'&&p.floor!==null&&p.floor!==f.floor){
     const verified=await env.HOME_DB.prepare("SELECT id FROM memberships WHERE premise_id=? AND status='approved' LIMIT 1").bind(p.id).first();
@@ -252,8 +264,9 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
   ]);
   await answer(env,q.id,'');
   if(inGroup){
-    await plainCard(env,s.user_id,`✅ Реєстрацію завершено\n${premiseLabel(p)}\nТепер можна голосувати.`);
+    await plainCard(env,s.user_id,`✅ Реєстрацію завершено\n${premiseLabel(p)}`);
     if(String(s.user_id)!==env.ADMIN_TELEGRAM_USER_ID){const {residentMenu}=await import('./resident-menu.ts');await residentMenu(env,s.user_id);}
+    await returnToRegistrationPoll(env,s.user_id,s.chat_id,f);
     return true;
   }
   await plainCard(env,s.user_id,`✅ Заявку надіслано\n${premiseLabel(p)}\n\nАдміністратор перевірить дані. Ми повідомимо тут про рішення. `);

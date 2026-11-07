@@ -1,3 +1,4 @@
+import { publishGroupWelcome } from './group-welcome.ts';
 import type { Button, Callback, ChatMemberUpdate, Env } from './env.ts';
 import { answer, send } from './telegram.ts';
 
@@ -90,8 +91,13 @@ export async function groupCallback(env: Env, q: Callback, updateId: number): Pr
     ]]); return true;
   }
   if (action === 'approve' && ['pending', 'rejected', 'disconnected'].includes(g.status)) {
-    await env.HOME_DB.prepare("UPDATE groups SET status='approved',version=? WHERE chat_id=? AND version=? AND bot_present=1").bind(updateId, id, g.version).run();
-    await answer(env, q.id, 'Групу підключено.');
+    const result=await env.HOME_DB.batch([
+      env.HOME_DB.prepare("UPDATE groups SET status='approved',version=? WHERE chat_id=? AND version=? AND bot_present=1").bind(updateId,id,g.version),
+      env.HOME_DB.prepare("INSERT INTO group_welcomes(chat_id,connection_version) SELECT chat_id,version FROM groups WHERE chat_id=? AND version=? AND status='approved' AND bot_present=1 ON CONFLICT DO NOTHING").bind(id,updateId),
+    ]);
+    await answer(env,q.id,'');
+    if(!result[0].meta.changes)return true;
+    await publishGroupWelcome(env,id!,updateId);
     await send(env, q.from.id, `✅ ${g.title} підключено. Ця група доступна при створенні голосування.`); return true;
   }
   if (action === 'reject' && g.status === 'pending') {

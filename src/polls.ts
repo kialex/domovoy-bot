@@ -1,9 +1,10 @@
+import { pollLink } from './resident-menu.ts';
 import { validInterval, validDuration } from './poll-settings.ts';
 import { ownMemberships, premiseLabel, roleLabel } from './premises.ts';
 import { escapeHtml } from './presentation.ts';
 import { pollCard } from './presentation.ts';
 import { connectedGroups, getGroup, isConnected } from './groups.ts';
-import type { Callback, Env } from './env.ts';
+import type { Button, Callback, Env } from './env.ts';
 import { answer, botStartUrl, registrationUrl, send, sendHtml, telegram } from './telegram.ts';
 import { parsePoll, positiveId } from './validation.ts';
 
@@ -100,7 +101,7 @@ async function validIntent(env:Env,uid:number,token:string) {
   if(!Number.isInteger(intent.option_index)||!options[intent.option_index])return null;
   return {intent,poll,options};
 }
-export async function openVoteIntent(env:Env,uid:number,token:string,page=0) {
+export async function openVoteIntent(env:Env,uid:number,token:string,page=0,receipt?:string) {
   const context=await validIntent(env,uid,token);
   if(!context)return send(env,uid,'Цей вибір уже недоступний або минуло 15 хвилин. Поверніться до голосування у групі та натисніть відповідь знову.');
   const {intent,poll,options}=context;
@@ -108,7 +109,7 @@ export async function openVoteIntent(env:Env,uid:number,token:string,page=0) {
   if(!units.length)return send(env,uid,'Немає підтверджених приміщень у цій групі. Додайте приміщення та дочекайтеся підтвердження.');
   const votes=(await env.HOME_DB.prepare(`SELECT v.* FROM premise_votes v JOIN memberships viewer ON viewer.premise_id=v.premise_id WHERE v.poll_id=? AND viewer.user_id=? AND viewer.status='approved'`).bind(poll.id,uid).all<{premise_id:number;user_id:number;option_index:number;voter_name:string;voter_role:string}>()).results;
   const byId=new Map(votes.map(v=>[v.premise_id,v]));
-  const buttons=units.slice(page*8,page*8+8).map(p=>{
+  const buttons:Button[][]=units.slice(page*8,page*8+8).map(p=>{
     const old=byId.get(p.id);
     return [{text:`${old?(old.user_id===uid?'✅':'🔒'):'🏠'} ${premiseLabel(p)}`,callback_data:`cast:${token}:${p.id}`}];
   });
@@ -117,8 +118,10 @@ export async function openVoteIntent(env:Env,uid:number,token:string,page=0) {
   if(units.length>(page+1)*8)navigation.push({text:'Далі →',callback_data:`vp:${token}:${page+1}`});
   if(navigation.length)buttons.push(navigation);
   if(units.length>1)buttons.push([{text:'Обрати цю відповідь для всіх моїх приміщень',callback_data:`va:ask:${token}`}]);
+  const link=poll.message_id?pollLink(poll.chat_id,poll.message_id):null;
+  if(link&&votes.some(v=>v.user_id===uid))buttons.unshift([{text:'↗️ Повернутися до голосування',url:link}]);
   const authors=units.slice(page*8,page*8+8).flatMap(p=>{const old=byId.get(p.id);return old?[`${premiseLabel(p)}: ${voterLabel(old.voter_name,old.voter_role)}`]:[];});
-  return sendHtml(env,uid,`🗳 <b>Від якого приміщення голосуємо?</b>\n\n${escapeHtml(poll.question)}\nВаш вибір: <b>${escapeHtml(options[intent.option_index])}</b>\n\nОберіть приміщення нижче.\n✅ — ваш голос: його можна змінити.\n🔒 — голос іншого мешканця: змінити його може лише автор.${authors.length ? `\n\nХто проголосував:\n${escapeHtml(authors.join('\n'))}` : ''}`,buttons);
+  return sendHtml(env,uid,`${receipt?escapeHtml(receipt)+'\n\n':''}🗳 <b>Від якого приміщення голосуємо?</b>\n\n${escapeHtml(poll.question)}\nВаш вибір: <b>${escapeHtml(options[intent.option_index])}</b>\n\nОберіть приміщення нижче.\n✅ — ваш голос: його можна змінити.\n🔒 — голос іншого мешканця: змінити його може лише автор.${authors.length ? `\n\nХто проголосував:\n${escapeHtml(authors.join('\n'))}` : ''}`,buttons);
 }
 export async function vote(env: Env, query: Callback) {
   const [,rawId,rawOption]=(query.data||'').split(':');
@@ -165,8 +168,12 @@ export async function privateVoteCallback(env:Env,q:Callback):Promise<boolean> {
   if (action==='va') await env.HOME_DB.prepare('UPDATE vote_intents SET bulk_ids=NULL WHERE token=? AND user_id=?').bind(token,q.from.id).run();
   const changed=results.reduce((sum,r)=>sum+(r.meta.changes?1:0),0);
   if(changed)await refreshPoll(env,poll.id);
-  await answer(env,q.id,changed?`Голос прийнято від приміщень: ${changed}.${selected.length>changed?' Решта вже голосували або доступ змінився.':''}`:await alreadyVoted(env,q.from.id,poll.id,selected[0].id));
-  await openVoteIntent(env,q.from.id,token);return true;
+  let receipt:string|undefined;
+  if(changed){
+    receipt=selected.length===1?`✅ Голос від ${selected[0].kind==='apartment'?`квартири ${selected[0].number}`:`«${selected[0].business_name}»`} зараховано.`:`✅ Зараховано голосів: ${changed}.${selected.length>changed?' Інші приміщення вже голосували або доступ змінився.':''}`;
+    await answer(env,q.id,'');
+  }else await answer(env,q.id,await alreadyVoted(env,q.from.id,poll.id,selected[0].id));
+  await openVoteIntent(env,q.from.id,token,0,receipt);return true;
 }
 export async function pollResults(env: Env, id: number, close: boolean) {
   let poll = await env.HOME_DB.prepare('SELECT * FROM polls WHERE id=?').bind(id).first<Poll>();

@@ -1,3 +1,4 @@
+import { retryGroupWelcomes } from './group-welcome.ts';
 import { joinRequest, joinCallback, retryJoins } from './join-requests.ts';
 import { HOUSE_RESIDENTS, houseResidents, directoryCallback } from './house-residents.ts';
 import { adminPollList, pollControls, pollControlCallback, scheduledReposts } from './poll-reposting.ts';
@@ -88,6 +89,7 @@ export default {
   async scheduled(_event:unknown,env:Env):Promise<void> {
     await scheduledReposts(env);
     await retryJoins(env);
+    await retryGroupWelcomes(env);
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const path = new URL(request.url).pathname;

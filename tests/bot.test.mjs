@@ -870,3 +870,84 @@ test('family role migration preserves existing memberships, audit and votes',()=
   sqlite.prepare("UPDATE memberships SET role='family' WHERE id=17").run();assert.equal(sqlite.prepare('PRAGMA foreign_key_check').all().length,0);
  }finally{sqlite.close();}
 });
+
+test('group approval posts one welcome with a house-specific private registration button',async()=>{
+ const h=harness(2);try{
+  h.sqlite.prepare("UPDATE groups SET status='pending' WHERE chat_id=-100001").run();
+  await h.cb(2,'group:approve:-100001:1');assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===-100001).length,0);
+  await h.cb(1,'group:approve:-100001:1');
+  const greetings=()=>h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===-100001);
+  assert.equal(greetings().length,1);const message=greetings()[0];assert.match(message.text,/Вітаємо, сусіди/);assert.match(message.text,/один голос/);assert.match(message.text,/Телефон бачить лише адміністратор/);
+  assert.match(message.reply_markup.inline_keyboard[0][0].url,/start=group_100001$/);
+  await h.cb(1,'group:approve:-100001:1');assert.equal(greetings().length,1);
+  assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===-100002).length,0);
+ }finally{h.close();}
+});
+
+test('group welcome retries independently of connection and stops after successful delivery',async()=>{
+ const {retryGroupWelcomes}=await import('../src/group-welcome.ts');const h=harness();try{
+  h.sqlite.prepare("UPDATE groups SET status='pending' WHERE chat_id=-100001").run();let fail=true;
+  h.apiOverride=(method,body)=>method==='sendMessage'&&Number(body.chat_id)===-100001&&fail?Response.json({ok:false},{status:403}):undefined;
+  await h.cb(1,'group:approve:-100001:1');assert.equal(h.sqlite.prepare('SELECT status FROM groups').get().status,'approved');assert.equal(h.sqlite.prepare('SELECT message_id FROM group_welcomes').get().message_id,null);
+  fail=false;await retryGroupWelcomes(h.env);assert.ok(h.sqlite.prepare('SELECT message_id FROM group_welcomes').get().message_id);
+  const before=h.calls.length;await retryGroupWelcomes(h.env);assert.equal(h.calls.length,before);
+ }finally{h.close();}
+});
+
+test('disconnected groups do not receive deferred welcomes; reconnecting gets a fresh welcome',async()=>{
+ const {retryGroupWelcomes}=await import('../src/group-welcome.ts');const h=harness();try{
+  h.sqlite.prepare("UPDATE groups SET status='disconnected' WHERE chat_id=-100001").run();
+  h.sqlite.prepare('INSERT INTO group_welcomes(chat_id,connection_version) VALUES (-100001,1)').run();
+  const before=h.calls.length;await retryGroupWelcomes(h.env);assert.equal(h.calls.length,before);
+  await h.cb(1,'group:approve:-100001:1');const current=h.sqlite.prepare('SELECT version FROM groups').get().version;
+  assert.ok(h.sqlite.prepare('SELECT message_id FROM group_welcomes WHERE connection_version=?').get(current).message_id);
+  assert.equal(h.sqlite.prepare('SELECT message_id FROM group_welcomes WHERE connection_version=1').get().message_id,null);
+ }finally{h.close();}
+});
+
+test('private apartment and commerce votes show confirmation and return to the current group poll',async()=>{
+ const h=harness();try{
+  const a=await register(h,2);const c=await register(h,2,{kind:'commercial',business:'Кав’ярня'});const p=await poll(h);
+  await cast(h,2,p,0);const intent=h.sqlite.prepare('SELECT * FROM vote_intents WHERE user_id=2').get();
+  await h.cb(2,`cast:${intent.token}:${a.premise_id}`);let message=h.calls.at(-1);
+  assert.match(message.text,/Голос від квартири 25 зараховано/);assert.ok(message.reply_markup.inline_keyboard.flat().some(b=>b.url===`https://t.me/c/001/${p.message_id}`));
+  assert.ok(message.reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`cast:${intent.token}:${c.premise_id}`));
+  h.sqlite.prepare('UPDATE polls SET message_id=77777 WHERE id=?').run(p.id);
+  await h.cb(2,`cast:${intent.token}:${c.premise_id}`);message=h.calls.at(-1);assert.match(message.text,/Голос від «Кав’ярня» зараховано/);
+  assert.ok(message.reply_markup.inline_keyboard.flat().some(b=>b.url==='https://t.me/c/001/77777'));assert.equal(currentVotes(h).length,2);
+  const ack=h.calls.findLast(c=>c.method==='answerCallbackQuery');assert.equal(ack.text,undefined);assert.equal(ack.show_alert,undefined);
+ }finally{h.close();}
+});
+
+test('one available premise casts directly in the group without a private selection',async()=>{
+ const h=harness();try{
+  await register(h,2);const p=await poll(h);const before=h.calls.length;await cast(h,2,p,0);
+  assert.equal(currentVotes(h).length,1);assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM vote_intents').get().n,0);
+  assert.equal(h.calls.slice(before).filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===2).length,0);
+ }finally{h.close();}
+});
+
+test('registration from a group poll auto-approves existing participants and returns to the latest poll message',async()=>{
+ const h=harness();try{
+  const p=await poll(h);await cast(h,2,p,0);assert.equal(currentVotes(h).length,0);
+  await h.msg(2,`/start poll_${p.id}`);const token=h.form(2).token;
+  h.apiOverride=method=>method==='getChatMember'?Response.json({ok:true,result:{status:'member'}}):undefined;
+  await h.cb(2,`reg:kind:${token}:apartment`);await h.msg(2,'25');await h.msg(2,'2');await h.msg(2,'Olena Koval');await h.msg(2,'0671234567');await h.cb(2,`reg:role:${token}:owner`);
+  h.sqlite.prepare('UPDATE polls SET message_id=88888 WHERE id=?').run(p.id);
+  const before=h.calls.length;await h.cb(2,`reg:submit:${token}`);
+  assert.equal(h.member(2,'25').status,'approved');assert.equal(h.calls.slice(before).filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===1).length,0);
+  const last=h.calls.at(-1);assert.equal(last.text,'Тепер можна проголосувати.');assert.equal(last.reply_markup.inline_keyboard[0][0].url,'https://t.me/c/001/88888');
+  assert.equal(currentVotes(h).length,0,'registration does not cast a vote without choosing an answer');
+  const updated=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(p.id);await cast(h,2,updated,0);assert.equal(currentVotes(h).length,1);
+ }finally{h.close();}
+});
+
+test('registration finishing after poll closure links to results without promising voting',async()=>{
+ const h=harness();try{
+  const p=await poll(h);await h.msg(2,`/start poll_${p.id}`);const token=h.form(2).token;
+  h.apiOverride=method=>method==='getChatMember'?Response.json({ok:true,result:{status:'member'}}):undefined;
+  await h.cb(2,`reg:kind:${token}:apartment`);await h.msg(2,'25');await h.msg(2,'2');await h.msg(2,'Olena Koval');await h.msg(2,'0671234567');await h.cb(2,`reg:role:${token}:family`);
+  await closePoll(h,p.id);await h.cb(2,`reg:submit:${token}`);
+  assert.equal(h.calls.at(-1).text,'Це голосування вже завершено.');assert.equal(h.calls.at(-1).reply_markup.inline_keyboard[0][0].text,'Переглянути результати');
+ }finally{h.close();}
+});

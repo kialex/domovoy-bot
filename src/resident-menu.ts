@@ -25,7 +25,10 @@ export async function showOwnData(env: Env, uid: number) {
 }
 export async function showOwnUnits(env: Env,uid:number,page=0) {
   const rows = await ownMemberships(env,uid);
-  const buttons:Button[][]=rows.slice(page*8,page*8+8).map(m=>[{text:`${m.status==='approved'?'✅':'⏳'} ${premiseLabel(m)} · ${m.group_title || ''} · ${roleLabel(m.role)}`.slice(0,60),callback_data:`unit:view:${m.id}`}]);
+  const buttons:Button[][]=rows.slice(page*8,page*8+8).map(m=>{
+    const label=m.kind==='apartment'?`Кв. ${m.number} · поверх ${m.floor??'не вказано'}`:premiseLabel(m);
+    return [{text:`${m.status==='approved'?'✅':'⏳'} ${label} · ${roleLabel(m.role)}`.slice(0,60),callback_data:`unit:view:${m.id}`}];
+  });
   const nav:Button[]=[];
   if(page>0)nav.push({text:'← Назад',callback_data:`resident:units:${page-1}`});
   if(rows.length>(page+1)*8)nav.push({text:'Далі →',callback_data:`resident:units:${page+1}`});

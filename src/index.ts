@@ -1,9 +1,9 @@
-import { adminPollList, pollControlCallback, scheduledReposts } from './poll-reposting.ts';
+import { adminPollList, pollControls, pollControlCallback, scheduledReposts } from './poll-reposting.ts';
 import { RESIDENT_ACTIONS, residentCallback, residentMenu, showOwnData, showOwnUnits, availablePolls, addUnit } from './resident-menu.ts';
 import { groupCallback, groupMembership, showGroups } from './groups.ts';
 import { ADMIN_ACTIONS, adminMenu, cancelPollWizard, requestPollWizard, pollWizardCallback, pollWizardMessage } from './poll-wizard.ts';
 import type { Env, Message, Update } from './env.ts';
-import { createPoll, pollResults, vote, openVoteIntent, privateVoteCallback } from './polls.ts';
+import { vote, openVoteIntent, privateVoteCallback } from './polls.ts';
 import { pendingRegistrations, registrationCallback, registrationMessage, startRegistration } from './registration.ts';
 import { send } from './telegram.ts';
 import { positiveId } from './validation.ts';
@@ -42,12 +42,11 @@ async function message(env: Env, m: Message, updateId: number) {
   if (['/poll', '/pending', '/results', '/close'].includes(command)) {
     if (!admin) return send(env, m.chat.id, 'Ця команда доступна лише адміністратору.');
     if (command === '/pending') return pendingRegistrations(env);
-    if (command === '/poll') return args.length ? createPoll(env, args.join(' '), updateId) : requestPollWizard(env, updateId);
+    if (command === '/poll') return requestPollWizard(env, updateId);
     const id = positiveId(args[0]);
-    if (!id) return send(env, m.chat.id, `Формат: ${command} номер_голосування`);
-    return pollResults(env, id, command === '/close');
+    return id ? pollControls(env,id) : adminPollList(env);
   }
-  if (command === '/help') return send(env, m.chat.id, '/start — реєстрація\n/cancel — скасувати заповнення\n/id — ваш Telegram ID' + (admin ? '\n/pending — заявки (перші 20)\n/poll Питання | Так | Ні — опублікувати\n/results ID — результати\n/close ID — завершити' : ''));
+  if (command === '/help') return admin ? adminMenu(env) : residentMenu(env,m.from.id);
   const registration = await env.HOME_DB.prepare('SELECT user_id FROM sessions WHERE user_id=?').bind(m.from.id).first();
   if (registration) return registrationMessage(env, m);
   if (await pollWizardMessage(env, m)) return;

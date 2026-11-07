@@ -90,7 +90,9 @@ export async function residentCallback(env:Env,q:Callback):Promise<boolean> {
   if(namespace==='resident'){
     await answer(env,q.id,'Відкриваю.');
     if(action==='data')await showOwnData(env,q.from.id);
-    else if(action==='menu')await residentMenu(env,q.from.id);
+    else if(action==='menu'){
+      if(String(q.from.id)===env.ADMIN_TELEGRAM_USER_ID){const {adminMenu}=await import('./poll-wizard.ts');await adminMenu(env);}else await residentMenu(env,q.from.id);
+    }
     else if(action==='add'){
       const id=Number(raw);if(Number.isSafeInteger(id)&&id<=0)await addUnit(env,q.from.id,id||undefined);
     }else{

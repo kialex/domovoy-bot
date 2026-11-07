@@ -19,17 +19,13 @@ export async function adminMenu(env: Env) {
   await telegram(env, 'setMyCommands', {
     scope: { type: 'chat', chat_id: Number(env.ADMIN_TELEGRAM_USER_ID) },
     commands: [
-      { command: 'menu', description: 'Головне меню' },
-      { command: 'poll', description: 'Створити голосування' },
-      { command: 'polls', description: 'Керувати голосуваннями' },
-      { command: 'pending', description: 'Заявки мешканців' },
-      { command: 'cancel', description: 'Скасувати заповнення' },
+      { command: 'menu', description: 'Відкрити головне меню' },
     ],
   });
   await telegram(env, 'setChatMenuButton', { chat_id: Number(env.ADMIN_TELEGRAM_USER_ID), menu_button: { type: 'commands' } });
   return telegram<{ message_id: number }>(env, 'sendMessage', {
     chat_id: env.ADMIN_TELEGRAM_USER_ID,
-    text: 'HomeBot 🏡\nОберіть дію на клавіатурі внизу чату.\n\nЯкщо клавіатура прихована, відкрийте її значком біля поля вводу. Команда /menu також повертає це меню.',
+    text: 'HomeBot 🏡\nОберіть дію на клавіатурі внизу чату.\n\nЯкщо клавіатура прихована, відкрийте її значком біля поля вводу. Або натисніть «Меню» біля поля вводу → «Відкрити головне меню».',
     reply_markup: {
       keyboard: [
         [{ text: ADMIN_ACTIONS.poll }, { text: ADMIN_ACTIONS.polls }],
@@ -45,7 +41,7 @@ export async function adminMenu(env: Env) {
 }
 export async function requestPollWizard(env: Env, updateId: number) {
   const form = await env.HOME_DB.prepare('SELECT user_id FROM sessions WHERE user_id=?').bind(env.ADMIN_TELEGRAM_USER_ID).first();
-  if (form) return send(env, env.ADMIN_TELEGRAM_USER_ID, 'Спочатку завершіть анкету приміщення або натисніть «Скасувати заповнення». Чернетка голосування не буде втрачена.');
+  if (form) return send(env, env.ADMIN_TELEGRAM_USER_ID, 'Спочатку завершіть анкету приміщення або натисніть «Скасувати заповнення». Чернетка голосування зберігається.');
   const old = await draftFor(env);
   if (old && old.step !== 'published') return send(env, env.ADMIN_TELEGRAM_USER_ID, 'У вас є незавершене голосування. Продовжіть його або скасуйте перед створенням нового.', [cancelButton(old.token)]);
   return startPollWizard(env, updateId);
@@ -150,7 +146,7 @@ export async function pollWizardCallback(env: Env, q: Callback, updateId: number
   const [, action, token, target, version] = q.data.split(':');
   const draft = await draftFor(env);
   if (!draft || draft.token !== token || draft.step === 'published') {
-    await answer(env, q.id, 'Ця чернетка вже недоступна. Відкрийте меню: /start.'); return true;
+    await answer(env, q.id, 'Ця чернетка вже недоступна. Відкрийте головне меню кнопкою внизу.'); return true;
   }
   if (action === 'cancel') {
     await cancelPollWizard(env); await answer(env, q.id, 'Створення скасовано.'); await adminMenu(env); return true;

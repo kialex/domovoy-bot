@@ -76,6 +76,11 @@ async function poll(h,chat=-100001,interval=0,duration=0) {
   await h.cb(1,`draft:interval:${d.token}:${interval}`);await h.cb(1,`draft:publish:${d.token}`);
   return h.sqlite.prepare('SELECT * FROM polls ORDER BY id DESC LIMIT 1').get();
 }
+async function closePoll(h,id) {
+  await h.cb(1,`pollctl:askclose:${id}`);
+  const c=h.sqlite.prepare('SELECT token FROM poll_close_confirmations WHERE user_id=1 AND poll_id=?').get(id);
+  if(c)await h.cb(1,`pollctl:close:${id}:${c.token}`);
+}
 const groupMessage=p=>({message_id:p.message_id,chat:{id:p.chat_id,type:'supergroup'}});
 async function cast(h,uid,p,option){await h.cb(uid,`vote:${p.id}:${option}`,groupMessage(p));}
 const currentVotes=h=>h.sqlite.prepare('SELECT * FROM premise_votes ORDER BY premise_id').all();
@@ -143,7 +148,7 @@ test('one premise vote stays in group, live counts update, other resident cannot
     assert.ok(!live.text.includes('Person'));await cast(h,3,p,1);assert.equal(currentVotes(h)[0].option_index,0);
     assert.match(h.calls.at(-1).text,/Person 2/);assert.match(h.calls.at(-1).text,/Власник/);assert.equal(h.calls.at(-1).method,'answerCallbackQuery');
     await cast(h,2,p,1);assert.equal(currentVotes(h)[0].option_index,1,'only the original author may change their vote');
-    await h.msg(1,`/close ${p.id}`);await cast(h,2,p,0);assert.equal(currentVotes(h)[0].option_index,1);
+    await closePoll(h,p.id);await cast(h,2,p,0);assert.equal(currentVotes(h)[0].option_index,1);
     const outcome=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).at(-1);assert.match(outcome.text,/ГОЛОСУВАННЯ ЗАВЕРШЕНО/);assert.equal(outcome.reply_markup,undefined);
     assert.ok(h.calls.some(c=>c.method==='deleteMessage'&&c.message_id===p.message_id));
   }finally{h.close();}
@@ -167,7 +172,7 @@ test('multiple premises: private intent is user-bound, individual choices differ
     h.sqlite.prepare('UPDATE vote_intents SET expires_at=0 WHERE token=?').run(next.token);
     await h.cb(2,`cast:${next.token}:${a.premise_id}`);assert.deepEqual(currentVotes(h).map(v=>v.option_index),[1,1]);
     await cast(h,2,p,0);intent=h.sqlite.prepare('SELECT * FROM vote_intents WHERE user_id=2').get();
-    await h.msg(1,`/close ${p.id}`);await h.cb(2,`va:confirm:${intent.token}`);assert.deepEqual(currentVotes(h).map(v=>v.option_index),[1,1]);
+    await closePoll(h,p.id);await h.cb(2,`va:confirm:${intent.token}`);assert.deepEqual(currentVotes(h).map(v=>v.option_index),[1,1]);
   }finally{h.close();}
 });
 
@@ -189,7 +194,7 @@ test('owners can revoke tenants only in their own premise; pending/foreign owner
     assert.equal(currentVotes(h).length,1,'revoking access must not remove or replace an already submitted vote');
     assert.equal(currentVotes(h)[0].user_id,3);
     await h.cb(2,`unit:remove:${tenant.id}:${tenant.version}`);assert.equal(h.sqlite.prepare("SELECT COUNT(*) AS n FROM membership_audit WHERE action='revoke'").get().n,1);
-    await cast(h,2,p,1);await h.msg(1,`/close ${p.id}`);
+    await cast(h,2,p,1);await closePoll(h,p.id);
     await h.cb(1,`unit:remove:${owner.id}:${owner.version}`);assert.equal(currentVotes(h).length,1,'closed tally is historical');
   }finally{h.close();}
 });
@@ -233,7 +238,11 @@ test('webhook secret, invalid payload, idempotency and Telegram failure retries'
     assert.equal((await h.post({update_id:'bad'})).status,400);
     await h.dispatch({message:{message_id:1,chat:{id:-100001,type:'supergroup'},from:{id:2},text:'/start'}});assert.equal(h.calls.length,0);
     await h.msg(1,'/start');const update=h.lastUpdate;const before=h.calls.length;await h.post(update);assert.equal(h.calls.length,before);
-    const request={update_id:h.nextId(),message:{message_id:1,chat:{id:1,type:'private'},from:{id:1},text:'/poll Retry | Yes | No'}};
+    await h.msg(1,'🗳 Створити голосування');
+    const d=h.sqlite.prepare('SELECT * FROM poll_drafts').get();
+    await h.msg(1,'Retry');await h.msg(1,'Yes');await h.msg(1,'No');
+    await h.cb(1,`draft:preview:${d.token}`);await h.cb(1,`draft:duration:${d.token}:0`);await h.cb(1,`draft:interval:${d.token}:0`);
+    const request={update_id:h.nextId(),callback_query:{id:'retry-publish',from:{id:1},data:`draft:publish:${d.token}`,message:{message_id:1,chat:{id:1,type:'private'}}}};
     h.fail='sendMessage';assert.equal((await h.post(request)).status,503);assert.equal(h.sqlite.prepare('SELECT state FROM updates WHERE id=?').get(request.update_id),undefined);
     h.fail=null;assert.equal((await h.post(request)).status,200);assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM polls').get().n,1);
   }finally{h.close();}
@@ -374,7 +383,7 @@ test('scheduled raises run only for due open connected polls; manual-only and cl
     h.sqlite.prepare('UPDATE polls SET next_repost_at=unixepoch()-1 WHERE id=?').run(timed.id);
     await scheduledReposts(h.env);const current=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(timed.id);assert.notEqual(current.message_id,timed.message_id);
     assert.equal(h.sqlite.prepare('SELECT message_id FROM polls WHERE id=?').get(manual.id).message_id,manual.message_id);
-    await h.msg(1,`/close ${timed.id}`);assert.equal(h.sqlite.prepare('SELECT next_repost_at FROM polls WHERE id=?').get(timed.id).next_repost_at,null);
+    await closePoll(h,timed.id);assert.equal(h.sqlite.prepare('SELECT next_repost_at FROM polls WHERE id=?').get(timed.id).next_repost_at,null);
     assert.equal(await raisePoll(h.env,timed.id,'closed-attempt'),'unavailable');
     h.sqlite.prepare('UPDATE polls SET next_repost_at=0 WHERE id=?').run(timed.id);await scheduledReposts(h.env);
     const finished=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(timed.id);assert.equal(finished.message_id,finished.result_message_id);assert.notEqual(finished.message_id,current.message_id);
@@ -506,7 +515,7 @@ test('expired votes are rejected immediately; scheduler posts one compact outcom
     assert.ok(outcomeIndex>=0&&deleteIndex>outcomeIndex);const outcome=actions[outcomeIndex];assert.equal(outcome.reply_markup,undefined);
     assert.ok(outcome.text.includes(`${'🟩'.repeat(5)} <b>Yes — 1 · 100%</b>`));assert.match(outcome.text,/Найбільше голосів/);assert.match(outcome.text,/Київ/);assert.ok(!outcome.text.includes('Person 2'));
     const before=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length;
-    await scheduledReposts(h.env);await h.msg(1,`/close ${p.id}`);assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length,before);
+    await scheduledReposts(h.env);await closePoll(h,p.id);assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length,before);
   }finally{h.close();}
 });
 
@@ -556,4 +565,24 @@ test('deadline migration does not republish completed history or impose deadline
     assert.equal(sqlite.prepare('SELECT duration_days FROM poll_drafts').get().duration_days,null);
     assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM polls WHERE status='closed' AND closed_at IS NOT NULL AND result_message_id IS NULL").get().n,0);
   }finally{sqlite.close();}
+});
+
+test('closing requires a fresh private confirmation for the chosen poll',async()=>{
+ const h=harness();try{
+  const p=await poll(h);const status=()=>h.sqlite.prepare('SELECT status FROM polls WHERE id=?').get(p.id).status;
+  await h.msg(1,`/close ${p.id}`);assert.equal(status(),'open');
+  await h.cb(1,`pollctl:close:${p.id}`);assert.equal(status(),'open');
+  await h.cb(1,`pollctl:askclose:${p.id}`);
+  const token=()=>h.sqlite.prepare('SELECT token FROM poll_close_confirmations WHERE poll_id=?').get(p.id)?.token;
+  const old=token();assert.ok(old);assert.ok(h.calls.at(-1).text.includes('Repair &lt;lift&gt; &amp; entrance?'));
+  await h.cb(2,`pollctl:close:${p.id}:${old}`);assert.equal(status(),'open');
+  await h.cb(1,`pollctl:cancelclose:${p.id}`);await h.cb(1,`pollctl:close:${p.id}:${old}`);assert.equal(status(),'open');
+  await h.cb(1,`pollctl:askclose:${p.id}`);const expired=token();
+  h.sqlite.prepare('UPDATE poll_close_confirmations SET expires_at=0').run();
+  await h.cb(1,`pollctl:close:${p.id}:${expired}`);assert.equal(status(),'open');
+  await closePoll(h,p.id);assert.equal(status(),'closed');
+  const before=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length;
+  await h.cb(1,`pollctl:close:${p.id}:${old}`);
+  assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length,before);
+ }finally{h.close();}
 });

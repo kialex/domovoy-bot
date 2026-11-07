@@ -11,7 +11,7 @@ interface Poll { id: number; question: string; options: string; chat_id: number;
 export async function createPoll(env: Env, input: string | { question: string; options: string[] }, updateId: number, chatId?: number, groupVersion?: number, repostInterval = 0, durationDays = 0) {
   if (!validInterval(repostInterval) || !validDuration(durationDays)) return false;
   const parsed = typeof input === 'string' ? parsePoll(input) : input;
-  if (!parsed) return send(env, env.ADMIN_TELEGRAM_USER_ID, 'Формат: /poll Питання | Варіант 1 | Варіант 2\nВід 2 до 8 різних варіантів (до 60 символів), питання — до 300 символів.');
+  if (!parsed) return send(env, env.ADMIN_TELEGRAM_USER_ID, 'Оберіть «Створити голосування» в меню. Бот по черзі запитає питання, варіанти, тривалість і частоту підняття.');
   if (!chatId) {
     const groups = await connectedGroups(env);
     if (groups.length !== 1) {

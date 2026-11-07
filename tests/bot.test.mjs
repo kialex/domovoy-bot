@@ -653,3 +653,60 @@ test('mobile result separates long labels from a bounded bar and compact Kyiv da
  assert.ok(text.includes('<code>▱▱▱▱▱▱▱▱▱▱</code>  0 голосів · <b>0%</b>'));
  assert.match(text,/07\.11\.2026,? 17:45/);
 });
+
+test('registration buttons acknowledge silently and explain stale choices in the chat',async()=>{
+ const h=harness();try{
+  await h.msg(2,'/start');const old=h.form(2).token;
+  await h.cb(2,`reg:kind:${old}:apartment`);
+  await h.cb(2,`reg:kind:${old}:commercial`);assert.match(h.calls.at(-1).text,/останнім запитанням/);
+  await h.msg(2,'25');await h.msg(2,'2');await h.msg(2,'Olena Koval');await h.msg(2,'0671234567');
+  await h.cb(2,`reg:role:${old}:owner`);await h.cb(2,`reg:back:${old}`);await h.cb(2,`reg:role:${old}:owner`);
+  await h.cb(2,`reg:submit:${old}`);await h.cb(2,`reg:submit:${old}`);
+  assert.match(h.calls.at(-1).text,/стара кнопка/);
+  for(const call of h.calls.filter(c=>c.method==='answerCallbackQuery')){
+   assert.equal(call.text,undefined);assert.equal(call.show_alert,undefined);
+  }
+  assert.equal(h.member(2,'25').status,'pending');
+ }finally{h.close();}
+});
+
+test('registration asks each field briefly without repeated headers or duplicate error cards',async()=>{
+ const h=harness();try{
+  await h.msg(2,'/start');const token=h.form(2).token;
+  assert.equal(h.calls.at(-1).text.trim(),'<b>Що реєструємо?</b>');
+  await h.cb(2,`reg:kind:${token}:apartment`);assert.equal(h.calls.at(-1).text.trim(),'<b>Напишіть номер квартири.</b>');
+  await h.msg(2,'25');const before=h.calls.filter(c=>c.method==='sendMessage').length;
+  await h.msg(2,'0');assert.equal(h.calls.filter(c=>c.method==='sendMessage').length,before+1);assert.equal(h.form(2).step,'floor');
+  await h.msg(2,'2');assert.equal(h.calls.at(-1).text.trim(),'<b>Напишіть ім’я та прізвище.</b>');
+  await h.msg(2,'Olena Koval');assert.equal(h.calls.at(-1).text.trim(),'<b>Напишіть номер телефону.</b>');
+  await h.msg(2,'0671234567');assert.equal(h.calls.at(-1).text.trim(),'<b>Ви власник чи орендар?</b>');
+ }finally{h.close();}
+});
+
+test('admin directory opens other apartments, contacts and confirmed owner revocation',async()=>{
+ const h=harness();try{
+  const m=await register(h,2,{number:'95',floor:'3'});const p=await poll(h);await cast(h,2,p,0);
+  await h.msg(1,'🏠 Головне меню');assert.ok(h.calls.at(-1).reply_markup.keyboard.flat().some(b=>b.text==='👥 Мешканці будинку'));
+  await h.msg(1,'👥 Мешканці будинку');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`directory:members:${m.premise_id}:0`));
+  await h.cb(1,`directory:members:${m.premise_id}:0`);assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`directory:person:${m.id}`));
+  await h.cb(1,`directory:person:${m.id}`);assert.match(h.calls.at(-1).text,/Person 2/);assert.match(h.calls.at(-1).text,/Власник/);assert.match(h.calls.at(-1).text,/\+380671234567/);
+  assert.equal(h.member(1,'95'),undefined);
+  await h.cb(1,`unit:askremove:${m.id}:${m.version}`);assert.equal(h.member(2,'95').status,'approved');
+  await h.cb(1,`unit:remove:${m.id}:${m.version}`);assert.equal(h.member(2,'95').status,'revoked');assert.equal(currentVotes(h).length,1);
+ }finally{h.close();}
+});
+
+test('directory protects foreign contacts, isolates houses, paginates and rejects disconnected records',async()=>{
+ const h=harness(2);try{
+  const a=await register(h,2);const b=await register(h,3,{number:'95',floor:'3',chat:-100002});
+  await h.msg(1,'👥 Мешканці будинку');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='directory:house:-100002:0'));
+  await h.cb(1,'directory:house:-100001:0');let buttons=h.calls.at(-1).reply_markup.inline_keyboard.flat();assert.ok(buttons.some(x=>x.callback_data===`directory:members:${a.premise_id}:0`));assert.ok(!buttons.some(x=>x.callback_data===`directory:members:${b.premise_id}:0`));
+  for(const uid of [2,3]){const before=h.calls.length;await h.cb(uid,`directory:person:${b.id}`);assert.equal(h.calls.slice(before).filter(c=>c.method==='sendMessage').length,0);}
+  const before=h.calls.length;await h.cb(1,`directory:person:${b.id}`,{message_id:1,chat:{id:-100002,type:'supergroup'}});assert.equal(h.calls.slice(before).filter(c=>c.method==='sendMessage').length,0);
+  for(let i=30;i<39;i++)await register(h,10+i,{number:String(i)});
+  await h.cb(1,'directory:house:-100001:0');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(x=>x.callback_data==='directory:house:-100001:1'));
+  await h.cb(1,'directory:house:-100001:1');assert.match(h.calls.at(-1).text,/Оберіть квартиру/);
+  h.sqlite.prepare("UPDATE groups SET status='disconnected' WHERE chat_id=-100002").run();
+  await h.cb(1,`directory:person:${b.id}`);assert.equal(h.calls.at(-1).text,'Мешканець недоступний.');
+ }finally{h.close();}
+});

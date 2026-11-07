@@ -43,8 +43,9 @@ export function sendHtml(env: Env, chatId: number | string, text: string, button
 }
 export function answer(env: Env, id: string, text: string, url?: string) {
   return telegram(env, 'answerCallbackQuery', {
-    callback_query_id: id, text, cache_time: 0,
-    ...(url ? { url } : { show_alert: true }),
+    callback_query_id: id, cache_time: 0,
+    ...(text ? {text} : {}),
+    ...(url ? { url } : text ? { show_alert: true } : {}),
   });
 }
 export async function botStartUrl(env: Env, payload: string) {

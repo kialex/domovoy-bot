@@ -103,7 +103,7 @@ export async function residentCallback(env:Env,q:Callback):Promise<boolean> {
   const id=positiveId(raw);
   if(!id){await answer(env,q.id,'Некоректний запис.');return true;}
   if(action==='view'||action==='members'){
-    await answer(env,q.id,'Відкриваю приміщення.');const page=action==='members'?Number(rawVersion||0):0;
+    await answer(env,q.id,'');const page=action==='members'?Number(rawVersion||0):0;
     if(Number.isSafeInteger(page)&&page>=0&&page<=100000)await showUnit(env,q.from.id,id,action==='members',page);return true;
   }
   const target=await env.HOME_DB.prepare(`${membershipSelect} WHERE m.id=? AND m.version=? AND m.status IN ('pending','approved')`).bind(id,Number(rawVersion)||0).first<Membership>();
@@ -111,8 +111,8 @@ export async function residentCallback(env:Env,q:Callback):Promise<boolean> {
   const owner=target?await env.HOME_DB.prepare("SELECT id FROM memberships WHERE user_id=? AND premise_id=? AND role='owner' AND status='approved'").bind(q.from.id,target.id).first():null;
   if(!target||target.user_id===q.from.id||(!admin&&(!owner||target.role==='owner'))||!isConnected(await getGroup(env,target.chat_id))){await answer(env,q.id,'Немає права змінювати цей доступ або запис застарів.');return true;}
   if(action==='askremove'){
-    await answer(env,q.id,'Підтвердіть дію.');
-    await send(env,q.from.id,`Вимкнути доступ для ${target.name}?\n${premiseLabel(target)}\n\nДоступ до інших приміщень не зміниться. Уже поданий голос від цього приміщення залишиться без змін. Доступ до майбутніх голосувань буде вимкнено.`,[[{text:'Так, вимкнути доступ',callback_data:`unit:remove:${id}:${target.version}`}],[{text:'Залишити доступ',callback_data:`unit:members:${target.id}:0`}]]);return true;
+    await answer(env,q.id,'');
+    await send(env,q.from.id,`Вимкнути доступ для ${target.name}?\n${premiseLabel(target)}\n\nІнші приміщення та поданий голос залишаться.`,[[{text:'Так, вимкнути доступ',callback_data:`unit:remove:${id}:${target.version}`}],[{text:'Залишити доступ',callback_data:`unit:members:${target.id}:0`}]]);return true;
   }
   if(action!=='remove'){await answer(env,q.id,'Недоступна дія.');return true;}
   await env.HOME_DB.batch([
@@ -121,8 +121,8 @@ export async function residentCallback(env:Env,q:Callback):Promise<boolean> {
 
     env.HOME_DB.prepare("INSERT INTO membership_audit(actor_id,membership_id,action) SELECT ?,id,'revoke' FROM memberships WHERE id=? AND status='revoked' AND version=?").bind(q.from.id,id,target.version+1),
   ]);
-  await answer(env,q.id,'Доступ вимкнено.');
-  await send(env,env.ADMIN_TELEGRAM_USER_ID,`Змінено доступ до приміщення\n${premiseLabel(target)} · група ${target.chat_id}\nКористувач ${q.from.id} вимкнув доступ для ${target.name} (${target.user_id}).`);
+  await answer(env,q.id,'');
+  await send(env,env.ADMIN_TELEGRAM_USER_ID,`Доступ вимкнено\n${target.name} · ${premiseLabel(target)}`);
   await send(env,target.user_id,`Доступ до ${premiseLabel(target).toLowerCase()} вимкнено.\nДоступ до інших приміщень зберігається. Якщо це помилка, зверніться до адміністратора.`);
   await showUnit(env,q.from.id,target.id,true);return true;
 }

@@ -1,3 +1,4 @@
+import { HOUSE_RESIDENTS, houseResidents, directoryCallback } from './house-residents.ts';
 import { adminPollList, pollControls, pollControlCallback, scheduledReposts } from './poll-reposting.ts';
 import { RESIDENT_ACTIONS, residentCallback, residentMenu, showOwnData, showOwnUnits, availablePolls, addUnit } from './resident-menu.ts';
 import { groupCallback, groupMembership, showGroups } from './groups.ts';
@@ -23,6 +24,7 @@ async function message(env: Env, m: Message, updateId: number) {
   if (admin && text === '🏁 Завершені голосування') return adminPollList(env,0,'closed');
   if (admin && text === ADMIN_ACTIONS.poll) return requestPollWizard(env, updateId);
   if (admin && text === ADMIN_ACTIONS.pending) return pendingRegistrations(env);
+  if (admin && text === HOUSE_RESIDENTS) return houseResidents(env);
   if (admin && text === ADMIN_ACTIONS.groups) return showGroups(env);
   if (text === RESIDENT_ACTIONS.data) return showOwnData(env, m.from.id);
   if (text === RESIDENT_ACTIONS.units) return showOwnUnits(env, m.from.id);
@@ -59,6 +61,7 @@ export async function handleUpdate(env: Env, update: Update) {
   if (update.callback_query) {
     const q = update.callback_query;
     if (q.from.is_bot) return;
+    if (await directoryCallback(env,q)) return;
     if (await pollControlCallback(env,q,update.update_id)) return;
     if (await privateVoteCallback(env, q)) return;
     if (await residentCallback(env, q)) return;

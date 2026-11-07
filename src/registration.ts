@@ -74,7 +74,7 @@ async function showForm(env: Env, s: Session) {
   const min = f.entrance === 1 ? 2 : 1;
   const max = f.entrance === 1 ? 14 : f.entrance === 2 ? 9 : 10;
   const prompts: Record<string,string> = {
-    kind: 'Що реєструємо?',
+    kind: f.poll_id?'Щоб проголосувати, пройдіть коротку реєстрацію. Після неї ви зможете повернутися до голосування.\n\nЩо реєструємо?':'Що реєструємо?',
     number: 'Напишіть номер квартири.',
     business_name: 'Напишіть назву закладу.',
     floor: `Напишіть ваш поверх (${min}–${max}).`,

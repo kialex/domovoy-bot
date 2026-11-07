@@ -131,7 +131,7 @@ export async function vote(env: Env, query: Callback) {
   const options=JSON.parse(poll.options) as string[];
   if(!Number.isInteger(option)||option<0||option>=options.length)return answer(env,query.id,'Некоректна відповідь.');
   const units=await ownMemberships(env,query.from.id,poll.chat_id,true);
-  if(!units.length)return answer(env,query.id,'Для голосування зареєструйте приміщення та дочекайтеся підтвердження.',await registrationUrl(env,poll.id));
+  if(!units.length)return answer(env,query.id,'Щоб проголосувати, пройдіть коротку реєстрацію.',await registrationUrl(env,poll.id));
   if(units.length===1){
     const result=await castStatement(env,poll,query.from.id,units[0].id,option).run();
     if(result.meta.changes)await refreshPoll(env,poll.id);

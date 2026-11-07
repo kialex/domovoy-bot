@@ -951,3 +951,12 @@ test('registration finishing after poll closure links to results without promisi
   assert.equal(h.calls.at(-1).text,'Це голосування вже завершено.');assert.equal(h.calls.at(-1).reply_markup.inline_keyboard[0][0].text,'Переглянути результати');
  }finally{h.close();}
 });
+
+test('poll registration explains why it opened before asking for the premise',async()=>{
+ const h=harness();try{
+  const p=await poll(h);await h.msg(2,`/start poll_${p.id}`);
+  const first=h.calls.at(-1);assert.match(first.text,/Щоб проголосувати, пройдіть коротку реєстрацію/);assert.match(first.text,/повернутися до голосування/);assert.match(first.text,/Що реєструємо/);
+  const token=h.form(2).token;await h.cb(2,`reg:kind:${token}:apartment`);
+  assert.equal(h.calls.at(-1).text,'Напишіть номер квартири.');
+ }finally{h.close();}
+});

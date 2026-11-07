@@ -6,7 +6,6 @@ import { membershipSelect, ownMemberships, premiseLabel, roleLabel } from './pre
 import type { Membership } from './premises.ts';
 import { positiveId } from './validation.ts';
 import { startRegistration } from './registration.ts';
-import { refreshPoll } from './polls.ts';
 
 export const RESIDENT_ACTIONS = {
   data: '👤 Мої дані', units: '🏠 Мої приміщення', polls: '🗳 Доступні голосування', add: '➕ Додати приміщення', menu: '🏠 Меню жителя',
@@ -68,7 +67,7 @@ async function showUnit(env:Env,uid:number,pid:number,showMembers=false,page=0) 
   if(!any || !isConnected(await getGroup(env,any.chat_id)))return send(env,uid,'Це приміщення недоступне.');
   if(showMembers && !admin && own?.status!=='approved')return send(env,uid,'Список мешканців стане доступним після підтвердження вашої заявки.');
   const group=await getGroup(env,any.chat_id);
-  if(!showMembers)return sendHtml(env,uid,`<b>${escapeHtml(premiseLabel(any))}</b>\n🏘 ${escapeHtml(group?.title||'')}\n${any.kind==='commercial'?`Назва: ${escapeHtml(any.business_name)}\n`:''}Під’їзд: ${any.entrance??'уточнюється'} · Поверх: ${any.floor??'уточнюється'}\n\n${own?`${roleLabel(own.role)} · ${statusLabel[own.status]}`:'Перегляд адміністратора'}`,own?.status==='approved'||admin?[[{text:any.kind==='apartment'?'👥 Мешканці квартири':'👥 Користувачі приміщення',callback_data:`unit:members:${pid}:0`}]]:undefined);
+  if(!showMembers)return sendHtml(env,uid,`<b>${escapeHtml(premiseLabel(any))}</b>\n🏘 ${escapeHtml(group?.title||'')}\n${any.kind==='apartment'?`Під’їзд: ${any.entrance??'уточнюється'} · Поверх: ${any.floor??'уточнюється'}`:''}\n\n${own?`${roleLabel(own.role)} · ${statusLabel[own.status]}`:'Перегляд адміністратора'}`,own?.status==='approved'||admin?[[{text:any.kind==='apartment'?'👥 Мешканці квартири':'👥 Користувачі приміщення',callback_data:`unit:members:${pid}:0`}]]:undefined);
   const rows=(await env.HOME_DB.prepare(`${membershipSelect} WHERE p.id=? AND m.status IN ('approved','pending') ORDER BY m.role,m.created_at LIMIT 9 OFFSET ?`).bind(pid,page*8).all<Membership>()).results;
   const canManage=admin||(own?.role==='owner'&&own.status==='approved');
   const lines=rows.slice(0,8).map(m=>`${m.role==='owner'?'🔑':'👤'} ${m.name} · ${roleLabel(m.role)} · ${statusLabel[m.status]}`);
@@ -109,19 +108,17 @@ export async function residentCallback(env:Env,q:Callback):Promise<boolean> {
   if(!target||target.user_id===q.from.id||(!admin&&(!owner||target.role==='owner'))||!isConnected(await getGroup(env,target.chat_id))){await answer(env,q.id,'Немає права змінювати цей доступ або запис застарів.');return true;}
   if(action==='askremove'){
     await answer(env,q.id,'Підтвердіть дію.');
-    await send(env,q.from.id,`Вимкнути доступ для ${target.name}?\n${premiseLabel(target)}\n\nДоступ до інших приміщень не зміниться. Голоси цієї людини від цього приміщення у відкритих голосуваннях будуть скасовані. Завершені результати збережуться.`,[[{text:'Так, вимкнути доступ',callback_data:`unit:remove:${id}:${target.version}`}],[{text:'Залишити доступ',callback_data:`unit:members:${target.id}:0`}]]);return true;
+    await send(env,q.from.id,`Вимкнути доступ для ${target.name}?\n${premiseLabel(target)}\n\nДоступ до інших приміщень не зміниться. Уже поданий голос від цього приміщення залишиться без змін. Доступ до майбутніх голосувань буде вимкнено.`,[[{text:'Так, вимкнути доступ',callback_data:`unit:remove:${id}:${target.version}`}],[{text:'Залишити доступ',callback_data:`unit:members:${target.id}:0`}]]);return true;
   }
   if(action!=='remove'){await answer(env,q.id,'Недоступна дія.');return true;}
-  const affected=(await env.HOME_DB.prepare("SELECT v.poll_id FROM premise_votes v JOIN polls p ON p.id=v.poll_id WHERE v.premise_id=? AND v.user_id=? AND p.status='open'").bind(target.id,target.user_id).all<{poll_id:number}>()).results;
   await env.HOME_DB.batch([
     env.HOME_DB.prepare(`UPDATE memberships SET status='revoked',version=version+1,reviewed_by=?,reviewed_at=unixepoch() WHERE id=? AND version=? AND status IN ('pending','approved')
       AND (?=1 OR (role='tenant' AND EXISTS(SELECT 1 FROM memberships own WHERE own.user_id=? AND own.premise_id=memberships.premise_id AND own.role='owner' AND own.status='approved')))`).bind(q.from.id,id,target.version,Number(admin),q.from.id),
-    env.HOME_DB.prepare("DELETE FROM premise_votes WHERE premise_id=? AND user_id=? AND poll_id IN (SELECT id FROM polls WHERE status='open') AND EXISTS(SELECT 1 FROM memberships WHERE id=? AND status='revoked' AND version=?)").bind(target.id,target.user_id,id,target.version+1),
+
     env.HOME_DB.prepare("INSERT INTO membership_audit(actor_id,membership_id,action) SELECT ?,id,'revoke' FROM memberships WHERE id=? AND status='revoked' AND version=?").bind(q.from.id,id,target.version+1),
   ]);
   await answer(env,q.id,'Доступ вимкнено.');
   await send(env,env.ADMIN_TELEGRAM_USER_ID,`Змінено доступ до приміщення\n${premiseLabel(target)} · група ${target.chat_id}\nКористувач ${q.from.id} вимкнув доступ для ${target.name} (${target.user_id}).`);
   await send(env,target.user_id,`Доступ до ${premiseLabel(target).toLowerCase()} вимкнено.\nДоступ до інших приміщень зберігається. Якщо це помилка, зверніться до адміністратора.`);
-  for(const p of affected)await refreshPoll(env,p.poll_id);
   await showUnit(env,q.from.id,target.id,true);return true;
 }

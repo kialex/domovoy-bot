@@ -10,5 +10,5 @@ export function pollCard(id: number, question: string, options: string[], counts
     const filled = Math.round(percent / 100 * 8);
     return `<b>${index + 1}. ${escapeHtml(option)}</b>\n${'▰'.repeat(filled)}${'▱'.repeat(8 - filled)}  ${count} · ${percent}%`;
   }).join('\n\n');
-  return `${closed ? '🏁' : '🗳'} <b>${closed ? 'Підсумки голосування' : 'Голосування будинку'}</b>\n№${id} · ${closed ? 'Завершено' : '🟢 Відкрите'}\n\n<b>${escapeHtml(question)}</b>\n\n${results}\n\n🏘 Проголосувало приміщень: <b>${total}</b>\n\n<i>${closed ? 'Дякуємо за участь! Голоси більше не приймаються.' : 'Оберіть відповідь кнопкою нижче.\nОдин голос від приміщення. Свій вибір можна змінити до завершення.'}</i>`;
+  return `${closed ? '🏁' : '🗳'} <b>${closed ? 'Підсумки голосування' : 'Голосування будинку'}</b>\n№${id} · ${closed ? 'Завершено' : '🟢 Відкрите'}\n\n<b>${escapeHtml(question)}</b>\n\n${results}\n\n🏘 Проголосувало приміщень: <b>${total}</b>\n\n<i>${closed ? 'Дякуємо за участь! Голоси більше не приймаються.' : 'Оберіть відповідь кнопкою нижче.\nОдин голос від приміщення. Змінити відповідь може лише той, хто її подав, до завершення голосування.'}</i>`;
 }

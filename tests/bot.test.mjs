@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, readdirSync } from 'node:fs';
 import worker from '../src/index.ts';
 import { apartmentNumber, parsePoll, ukrainianPhone } from '../src/validation.ts';
-import { entranceForApartment, commercialNumber, validFloor } from '../src/premises.ts';
+import { entranceForApartment, commercialKey, validFloor } from '../src/premises.ts';
 import { pollCard } from '../src/presentation.ts';
 
 function database(until = '9999') {
@@ -39,7 +39,7 @@ function harness(groups=1) {
     async msg(uid,text){return h.dispatch({message:{message_id:++message,chat:{id:uid,type:'private'},from:{id:uid},text}});},
     async cb(uid,data,groupMessage){return h.dispatch({callback_query:{id:String(++message),from:{id:uid},data,message:groupMessage||{message_id:message,chat:{id:uid,type:'private'}}}});},
     form(uid){return sqlite.prepare('SELECT * FROM sessions WHERE user_id=?').get(uid);},
-    member(uid,number,chat=-100001,kind='apartment'){return sqlite.prepare('SELECT m.*,p.number,p.chat_id,p.kind FROM memberships m JOIN premises p ON p.id=m.premise_id WHERE m.user_id=? AND p.number=? AND p.chat_id=? AND p.kind=?').get(uid,number,chat,kind);},
+    member(uid,number,chat=-100001,kind='apartment'){return sqlite.prepare('SELECT m.*,p.number,p.chat_id,p.kind FROM memberships m JOIN premises p ON p.id=m.premise_id WHERE m.user_id=? AND p.number=? AND p.chat_id=? AND p.kind=?').get(uid,kind==='commercial'?commercialKey(number):number,chat,kind);},
     nextId(){return ++update;},close(){globalThis.fetch=oldFetch;sqlite.close();},
   };
   globalThis.fetch=async(url,init)=>{
@@ -53,15 +53,17 @@ async function register(h,uid,{number='25',kind='apartment',floor='2',entrance='
   await h.msg(uid,`/register group_${Math.abs(chat)}`);
   const token=h.form(uid).token;
   await h.cb(uid,`reg:kind:${token}:${kind}`);
-  await h.msg(uid,number);
-  if(kind==='commercial'){await h.msg(uid,business);await h.msg(uid,entrance);}
-  await h.msg(uid,floor);await h.msg(uid,`Person ${uid}`);await h.msg(uid,phone);await h.cb(uid,`reg:role:${token}:${role}`);
+  if(kind==='commercial')await h.msg(uid,business);
+  else {await h.msg(uid,number);await h.msg(uid,floor);}
+  if(h.form(uid).step==='name')await h.msg(uid,`Person ${uid}`);
+  if(h.form(uid).step==='phone')await h.msg(uid,phone);
+  await h.cb(uid,`reg:role:${token}:${role}`);
   assert.equal(h.form(uid).step,'review');
   await h.cb(uid,`reg:submit:${token}`);
-  const m=h.member(uid,number,chat,kind);
+  const m=h.member(uid,kind==='commercial'?business:number,chat,kind);
   assert.ok(m,'Application must be stored');
   if(approve&&m.status==='pending')await h.cb(1,`review:approve:${m.id}:${m.application_token}`);
-  return h.member(uid,number,chat,kind);
+  return h.member(uid,kind==='commercial'?business:number,chat,kind);
 }
 async function poll(h,chat=-100001) {
   await h.msg(1,'🗳 Створити голосування');
@@ -82,7 +84,7 @@ test('house structure, commercial identities, phones and presentation validation
   assert.equal(validFloor('apartment',1,'1'),null);assert.equal(validFloor('apartment',1,'14'),14);
   assert.equal(validFloor('apartment',2,'0'),null);assert.equal(validFloor('apartment',2,'9'),9);assert.equal(validFloor('apartment',2,'10'),null);
   assert.equal(validFloor('apartment',3,'10'),10);assert.equal(validFloor('commercial',2,'0'),0);assert.equal(validFloor('commercial',1,'1'),1);
-  assert.deepEqual(commercialNumber('007 – 008'),{number:'7-8',start:7,end:8});assert.equal(commercialNumber('8-7'),null);assert.equal(commercialNumber('7/8'),null);
+  assert.equal(commercialKey('  АПТЕКА   Здоров’я '),commercialKey('Аптека Здоров’я'));
   for(const value of ['+380671234567','380671234567','067 123 45 67','+38 (067) 123-45-67'])assert.equal(ukrainianPhone(value),'+380671234567');
   for(const value of ['', '+48123456789','+3800671234567','phone:0671234567','+380000000000'])assert.equal(ukrainianPhone(value),null);
   assert.equal(parsePoll('Question | Same | Same'),null);
@@ -114,14 +116,15 @@ test('private registration: preview, invalid floor/phone, back, restart, consent
   }finally{h.close();}
 });
 
-test('commercial registration uses one canonical range, permits ground floor and prevents overlapping approved units',async()=>{
+test('commercial registration uses name only and shares canonical business identity',async()=>{
   const h=harness();try{
-    const first=await register(h,2,{kind:'commercial',number:'7-8',entrance:'2',floor:'0'});assert.equal(first.status,'approved');
+    const first=await register(h,2,{kind:'commercial',business:'Coffee & Co'});assert.equal(first.status,'approved');
     const unit=h.sqlite.prepare('SELECT * FROM premises WHERE id=?').get(first.premise_id);
-    assert.equal(unit.number,'7-8');assert.equal(unit.floor,0);assert.equal(unit.business_name,'Coffee & Co');
-    const second=await register(h,3,{kind:'commercial',number:'8',entrance:'2',floor:'0'});
-    assert.equal(second.status,'pending','overlapping range must not receive second voting entitlement');
-    const third=await register(h,4,{kind:'commercial',number:'10-12',entrance:'3',floor:'0'});assert.equal(third.status,'approved');
+    assert.equal(unit.number,'business:coffee & co');assert.equal(unit.floor,null);assert.equal(unit.entrance,null);assert.equal(unit.business_name,'Coffee & Co');
+    const second=await register(h,3,{kind:'commercial',business:'  COFFEE   & CO  '});assert.equal(second.status,'approved');
+    assert.equal(second.premise_id,first.premise_id);
+    const third=await register(h,2,{kind:'commercial',business:'Аптека'});assert.equal(third.status,'approved');
+    assert.notEqual(third.premise_id,first.premise_id);
   }finally{h.close();}
 });
 
@@ -135,7 +138,8 @@ test('one premise vote stays in group, live counts update, other resident cannot
     await cast(h,2,p,0);assert.equal(currentVotes(h).length,1);
     const live=h.calls.filter(c=>c.method==='editMessageText').at(-1);assert.match(live.text,/100%/);assert.equal(live.reply_markup.inline_keyboard[0][0].text,'Yes · 1');
     assert.ok(!live.text.includes('Person'));await cast(h,3,p,1);assert.equal(currentVotes(h)[0].option_index,0);
-    await cast(h,2,p,1);assert.equal(currentVotes(h)[0].option_index,1);
+    assert.match(h.calls.at(-1).text,/Person 2/);assert.match(h.calls.at(-1).text,/Власник/);assert.equal(h.calls.at(-1).method,'answerCallbackQuery');
+    await cast(h,2,p,1);assert.equal(currentVotes(h)[0].option_index,1,'only the original author may change their vote');
     await h.msg(1,`/close ${p.id}`);await cast(h,2,p,0);assert.equal(currentVotes(h)[0].option_index,1);
     assert.deepEqual(h.calls.filter(c=>c.method==='editMessageText').at(-1).reply_markup.inline_keyboard,[]);
   }finally{h.close();}
@@ -178,7 +182,8 @@ test('owners can revoke tenants only in their own premise; pending/foreign owner
     await h.cb(2,`unit:remove:${otherOwner.id}:${otherOwner.version}`);assert.equal(h.member(4,'25').status,'approved');
     await h.cb(2,`unit:askremove:${tenant.id}:${tenant.version}`);assert.equal(h.member(3,'25').status,'approved','confirmation is separate');
     await h.cb(2,`unit:remove:${tenant.id}:${tenant.version}`);assert.equal(h.member(3,'25').status,'revoked');assert.equal(h.member(3,'26').status,'approved');
-    assert.equal(currentVotes(h).length,0,'open votes from revoked membership removed');
+    assert.equal(currentVotes(h).length,1,'revoking access must not remove or replace an already submitted vote');
+    assert.equal(currentVotes(h)[0].user_id,3);
     await h.cb(2,`unit:remove:${tenant.id}:${tenant.version}`);assert.equal(h.sqlite.prepare("SELECT COUNT(*) AS n FROM membership_audit WHERE action='revoke'").get().n,1);
     await cast(h,2,p,1);await h.msg(1,`/close ${p.id}`);
     await h.cb(1,`unit:remove:${owner.id}:${owner.version}`);assert.equal(currentVotes(h).length,1,'closed tally is historical');
@@ -257,5 +262,65 @@ test('revoked membership and newly approved units cannot expand an already confi
     await h.cb(2,`va:confirm:${intent.token}`);
     assert.deepEqual(currentVotes(h).map(v=>v.premise_id),[a.premise_id]);
     assert.ok(!currentVotes(h).some(v=>v.premise_id===c.premise_id),'a new unit must not be silently added to prior confirmation');
+  }finally{h.close();}
+});
+
+test('saved contacts are reused for commerce and additional apartments; commerce asks only name and role',async()=>{
+  const h=harness();try{
+    await register(h,2);
+    await h.msg(2,'➕ Додати приміщення');const token=h.form(2).token;
+    await h.cb(2,`reg:kind:${token}:commercial`);assert.equal(h.form(2).step,'business_name');
+    await h.msg(2,'Аптека');assert.equal(h.form(2).step,'role');
+    await h.cb(2,`reg:role:${token}:owner`);assert.equal(h.form(2).step,'review');
+    const review=h.calls.at(-1).text;
+    assert.match(review,/Аптека/);assert.match(review,/Person 2/);assert.match(review,/\+380671234567/);
+    assert.ok(!review.includes('Під’їзд'));assert.ok(!review.includes('Поверх'));assert.ok(!review.includes('business:'));
+    await h.cb(2,`reg:submit:${token}`);
+    const business=h.member(2,'Аптека',-100001,'commercial');assert.ok(business);
+    await h.cb(1,`review:approve:${business.id}:${business.application_token}`);
+    await h.cb(2,`unit:view:${business.premise_id}`);assert.ok(!h.calls.at(-1).text.includes('Під’їзд'));assert.ok(!h.calls.at(-1).text.includes('Поверх'));
+    await h.msg(2,'➕ Додати приміщення');const apartmentToken=h.form(2).token;
+    await h.cb(2,`reg:kind:${apartmentToken}:apartment`);await h.msg(2,'68');await h.msg(2,'10');
+    assert.equal(h.form(2).step,'role','existing name and phone must not be requested again for an apartment');
+    await h.cb(2,`reg:back:${apartmentToken}`);assert.equal(h.form(2).step,'floor');
+    await h.msg(2,'11');await h.cb(2,`reg:role:${apartmentToken}:owner`);await h.cb(2,`reg:restart:${apartmentToken}`);
+    const restart=h.form(2).token;await h.cb(2,`reg:kind:${restart}:commercial`);await h.msg(2,'Кав’ярня');assert.equal(h.form(2).step,'role');
+  }finally{h.close();}
+});
+
+test('in-progress commerce from old form skips location and saved contacts after upgrade',async()=>{
+  const h=harness();try{
+    await register(h,2);
+    h.sqlite.prepare("INSERT INTO sessions(user_id,chat_id,token,step,data) VALUES (2,-100001,'old-form','entrance',?)").run(JSON.stringify({kind:'commercial',number:'7-8',business_name:'Аптека'}));
+    await h.msg(2,'2');assert.equal(h.form(2).step,'role');
+    const data=JSON.parse(h.form(2).data);assert.equal(data.name,'Person 2');assert.equal(data.phone,'+380671234567');assert.equal(data.entrance,undefined);assert.equal(data.floor,undefined);
+  }finally{h.close();}
+});
+
+test('owner and co-owner cannot replace tenant vote; author name and role are shown privately and remain a snapshot',async()=>{
+  const h=harness();try{
+    await register(h,2);await register(h,3,{role:'tenant'});await register(h,4);
+    const p=await poll(h);await cast(h,3,p,0);
+    for(const uid of [2,4]){
+      await cast(h,uid,p,1);assert.equal(currentVotes(h)[0].option_index,0);assert.equal(currentVotes(h)[0].user_id,3);
+      const notice=h.calls.at(-1);assert.equal(notice.method,'answerCallbackQuery');assert.match(notice.text,/Person 3/);assert.match(notice.text,/Орендар/);assert.match(notice.text,/попросіть змінити свій голос/);assert.ok(notice.text.length<=200);assert.ok(!notice.text.includes('+380'));
+    }
+    h.sqlite.prepare("UPDATE profiles SET name='Changed name' WHERE user_id=3").run();
+    h.sqlite.prepare("UPDATE memberships SET role='owner' WHERE user_id=3").run();
+    await cast(h,2,p,1);assert.match(h.calls.at(-1).text,/Person 3/);assert.match(h.calls.at(-1).text,/Орендар/);
+    const publicEdits=h.calls.filter(c=>c.method==='editMessageText');assert.equal(publicEdits.length,1);assert.ok(!publicEdits[0].text.includes('Person'));
+  }finally{h.close();}
+});
+
+test('bulk vote changes only the requesting authors own votes',async()=>{
+  const h=harness();try{
+    const a=await register(h,2,{number:'25'});const b=await register(h,2,{number:'26'});const p=await poll(h);
+    await cast(h,2,p,0);let intent=h.sqlite.prepare('SELECT * FROM vote_intents WHERE user_id=2').get();
+    await h.cb(2,`cast:${intent.token}:${a.premise_id}`);
+    await cast(h,2,p,1);intent=h.sqlite.prepare('SELECT * FROM vote_intents WHERE user_id=2').get();
+    await h.cb(2,`va:ask:${intent.token}`);await h.cb(2,`va:confirm:${intent.token}`);
+    assert.equal(currentVotes(h).find(v=>v.premise_id===a.premise_id).option_index,1);
+    assert.equal(currentVotes(h).find(v=>v.premise_id===b.premise_id).option_index,1);
+    assert.match(h.calls.at(-1).text,/Person 2/);
   }finally{h.close();}
 });

@@ -16,12 +16,8 @@ export function entranceForApartment(value: string): number | null {
   const n = Number(value);
   return n <= 84 ? 1 : n <= 133 ? 2 : n <= 187 ? 3 : null;
 }
-export function commercialNumber(value: string): { number: string; start: number; end: number } | null {
-  const match = /^(\d{1,4})(?:\s*[-–—]\s*(\d{1,4}))?$/.exec(value.trim());
-  if (!match) return null;
-  const start = Number(match[1]); const end = Number(match[2] || match[1]);
-  if (!start || !end || end < start || end - start > 100) return null;
-  return { number: start === end ? String(start) : `${start}-${end}`, start, end };
+export function commercialKey(name: string): string {
+  return `business:${name.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase()}`;
 }
 export function validFloor(kind: string, entrance: number, value: string): number | null {
   if (!/^\d{1,2}$/.test(value.trim())) return null;
@@ -30,7 +26,7 @@ export function validFloor(kind: string, entrance: number, value: string): numbe
   const maximum = entrance === 1 ? 14 : entrance === 2 ? 9 : entrance === 3 ? 10 : -1;
   return floor >= minimum && floor <= maximum ? floor : null;
 }
-export const premiseLabel = (p: Pick<Premise, 'kind' | 'number'>) => `${p.kind === 'apartment' ? 'Квартира' : 'Приміщення'} ${p.number}`;
+export const premiseLabel = (p: Pick<Premise, 'kind' | 'number'> & Partial<Pick<Premise, 'business_name'>>) => p.kind === 'apartment' ? `Квартира ${p.number}` : `🏪 ${p.business_name || 'Комерція'}`;
 export const roleLabel = (role: string) => role === 'owner' ? 'Власник' : 'Орендар';
 export async function ownMemberships(env: Env, uid: number, chatId?: number, approvedOnly = false) {
   return (await env.HOME_DB.prepare(`${membershipSelect.replace('SELECT p.*', 'SELECT g.title AS group_title,p.*')} JOIN groups g ON g.chat_id=p.chat_id WHERE m.user_id=? AND g.status='approved' AND g.bot_present=1 ${chatId ? 'AND p.chat_id=?' : ''} ${approvedOnly ? "AND m.status='approved' AND u.phone GLOB '+380[1-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'" : "AND m.status IN ('pending','approved')"} ORDER BY p.chat_id,p.kind,p.number_start`)

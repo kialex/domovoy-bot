@@ -1,4 +1,4 @@
-import { ownMemberships, premiseLabel } from './premises.ts';
+import { ownMemberships, premiseLabel, roleLabel } from './premises.ts';
 import { escapeHtml } from './presentation.ts';
 import { pollCard } from './presentation.ts';
 import { connectedGroups, getGroup, isConnected } from './groups.ts';
@@ -53,13 +53,27 @@ export async function refreshPoll(env:Env,id:number) {
   await telegram(env,'editMessageText',{chat_id:poll.chat_id,message_id:poll.message_id,text:view.text,parse_mode:'HTML',reply_markup:{inline_keyboard:view.buttons}});
 }
 function castStatement(env:Env,poll:Poll,uid:number,premiseId:number,option:number) {
-  return env.HOME_DB.prepare(`INSERT INTO premise_votes(poll_id,premise_id,user_id,option_index)
-    SELECT p.id,u.id,m.user_id,? FROM polls p JOIN premises u ON u.chat_id=p.chat_id
+  return env.HOME_DB.prepare(`INSERT INTO premise_votes(poll_id,premise_id,user_id,option_index,voter_name,voter_role)
+    SELECT p.id,u.id,m.user_id,?,profile.name,m.role FROM polls p JOIN premises u ON u.chat_id=p.chat_id
     JOIN memberships m ON m.premise_id=u.id JOIN profiles profile ON profile.user_id=m.user_id JOIN groups g ON g.chat_id=p.chat_id
     WHERE p.id=? AND p.status='open' AND u.id=? AND m.user_id=? AND m.status='approved'
     AND profile.phone GLOB '+380[1-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]' AND g.status='approved' AND g.bot_present=1
     ON CONFLICT(poll_id,premise_id) DO UPDATE SET option_index=excluded.option_index,updated_at=unixepoch()
     WHERE premise_votes.user_id=excluded.user_id`).bind(option,poll.id,premiseId,uid);
+}
+function voterLabel(name:string, role:string) {
+  return `${name || 'Мешканець'} · ${['owner','tenant'].includes(role) ? roleLabel(role) : 'мешканець'}`;
+}
+async function alreadyVoted(env:Env,uid:number,pollId:number,premiseId:number) {
+  const old=await env.HOME_DB.prepare(`SELECT v.voter_name,v.voter_role FROM premise_votes v
+    JOIN memberships viewer ON viewer.premise_id=v.premise_id JOIN premises p ON p.id=v.premise_id JOIN groups g ON g.chat_id=p.chat_id
+    WHERE v.poll_id=? AND v.premise_id=? AND viewer.user_id=? AND viewer.status='approved' AND g.status='approved' AND g.bot_present=1`)
+    .bind(pollId,premiseId,uid).first<{voter_name:string;voter_role:string}>();
+  if (!old) return 'Голосування недоступне або ваш доступ змінився.';
+  const role = ['owner','tenant'].includes(old.voter_role) ? roleLabel(old.voter_role) : 'мешканець';
+  const suffix = ` · ${role}\nЯкщо ваші думки не збігаються, зверніться до цієї людини та попросіть змінити свій голос.`;
+  const name = (old.voter_name || 'Мешканець').slice(0,200 - 'Голос подав: '.length - suffix.length);
+  return `Голос подав: ${name}${suffix}`;
 }
 async function validIntent(env:Env,uid:number,token:string) {
   const intent=await env.HOME_DB.prepare('SELECT * FROM vote_intents WHERE token=? AND user_id=? AND expires_at>unixepoch()').bind(token,uid).first<Intent>();
@@ -76,7 +90,7 @@ export async function openVoteIntent(env:Env,uid:number,token:string,page=0) {
   const {intent,poll,options}=context;
   const units=await ownMemberships(env,uid,poll.chat_id,true);
   if(!units.length)return send(env,uid,'Немає підтверджених приміщень у цій групі. Додайте приміщення та дочекайтеся підтвердження.');
-  const votes=(await env.HOME_DB.prepare('SELECT premise_id,user_id,option_index FROM premise_votes WHERE poll_id=?').bind(poll.id).all<{premise_id:number;user_id:number;option_index:number}>()).results;
+  const votes=(await env.HOME_DB.prepare(`SELECT v.* FROM premise_votes v JOIN memberships viewer ON viewer.premise_id=v.premise_id WHERE v.poll_id=? AND viewer.user_id=? AND viewer.status='approved'`).bind(poll.id,uid).all<{premise_id:number;user_id:number;option_index:number;voter_name:string;voter_role:string}>()).results;
   const byId=new Map(votes.map(v=>[v.premise_id,v]));
   const buttons=units.slice(page*8,page*8+8).map(p=>{
     const old=byId.get(p.id);
@@ -87,7 +101,8 @@ export async function openVoteIntent(env:Env,uid:number,token:string,page=0) {
   if(units.length>(page+1)*8)navigation.push({text:'Далі →',callback_data:`vp:${token}:${page+1}`});
   if(navigation.length)buttons.push(navigation);
   if(units.length>1)buttons.push([{text:'Обрати цю відповідь для всіх моїх приміщень',callback_data:`va:ask:${token}`}]);
-  return sendHtml(env,uid,`🗳 <b>Від якого приміщення голосуємо?</b>\n\n${escapeHtml(poll.question)}\nВаш вибір: <b>${escapeHtml(options[intent.option_index])}</b>\n\nОберіть приміщення нижче.\n✅ — ваш голос уже подано; його можна змінити.\n🔒 — голос подав інший мешканець приміщення.`,buttons);
+  const authors=units.slice(page*8,page*8+8).flatMap(p=>{const old=byId.get(p.id);return old?[`${premiseLabel(p)}: ${voterLabel(old.voter_name,old.voter_role)}`]:[];});
+  return sendHtml(env,uid,`🗳 <b>Від якого приміщення голосуємо?</b>\n\n${escapeHtml(poll.question)}\nВаш вибір: <b>${escapeHtml(options[intent.option_index])}</b>\n\nОберіть приміщення нижче.\n✅ — ваш голос: його можна змінити.\n🔒 — голос іншого мешканця: змінити його може лише автор.${authors.length ? `\n\nХто проголосував:\n${escapeHtml(authors.join('\n'))}` : ''}`,buttons);
 }
 export async function vote(env: Env, query: Callback) {
   const [,rawId,rawOption]=(query.data||'').split(':');
@@ -101,7 +116,7 @@ export async function vote(env: Env, query: Callback) {
   if(units.length===1){
     const result=await castStatement(env,poll,query.from.id,units[0].id,option).run();
     if(result.meta.changes)await refreshPoll(env,poll.id);
-    return answer(env,query.id,result.meta.changes?`Голос прийнято: ${options[option]}`:'Голос уже подав інший мешканець цього приміщення або доступ змінився.');
+    return answer(env,query.id,result.meta.changes?`Голос прийнято: ${options[option]}`:await alreadyVoted(env,query.from.id,poll.id,units[0].id));
   }
   const token=crypto.randomUUID().replace(/-/g,'').slice(0,16);
   await env.HOME_DB.prepare(`INSERT INTO vote_intents(token,user_id,poll_id,option_index,expires_at) VALUES (?,?,?,?,unixepoch()+900)
@@ -134,7 +149,7 @@ export async function privateVoteCallback(env:Env,q:Callback):Promise<boolean> {
   if (action==='va') await env.HOME_DB.prepare('UPDATE vote_intents SET bulk_ids=NULL WHERE token=? AND user_id=?').bind(token,q.from.id).run();
   const changed=results.reduce((sum,r)=>sum+(r.meta.changes?1:0),0);
   if(changed)await refreshPoll(env,poll.id);
-  await answer(env,q.id,changed?`Голос прийнято від приміщень: ${changed}.`:'Голос уже подав інший мешканець або доступ змінився.');
+  await answer(env,q.id,changed?`Голос прийнято від приміщень: ${changed}.${selected.length>changed?' Решта вже голосували або доступ змінився.':''}`:await alreadyVoted(env,q.from.id,poll.id,selected[0].id));
   await openVoteIntent(env,q.from.id,token);return true;
 }
 export async function pollResults(env: Env, id: number, close: boolean) {

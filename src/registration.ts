@@ -3,23 +3,49 @@ import { connectedGroups, getGroup, groupId, isConnected } from './groups.ts';
 import { answer, sendHtml } from './telegram.ts';
 import { escapeHtml } from './presentation.ts';
 import { apartmentNumber, positiveId, ukrainianPhone } from './validation.ts';
-import { commercialNumber, entranceForApartment, membershipSelect, premiseLabel, roleLabel, validFloor } from './premises.ts';
+import { commercialKey, entranceForApartment, membershipSelect, premiseLabel, roleLabel, validFloor } from './premises.ts';
 import type { Membership, Premise } from './premises.ts';
 
 interface Form {
   kind?: 'apartment' | 'commercial'; number?: string; business_name?: string; entrance?: number; floor?: number;
-  name?: string; phone?: string; role?: 'owner' | 'tenant'; poll_id?: number;
+  ask_name?: boolean; ask_phone?: boolean; name?: string; phone?: string; role?: 'owner' | 'tenant'; poll_id?: number;
 }
 interface Session { user_id: number; chat_id: number; token: string; step: string; data: string }
 const token = () => crypto.randomUUID().replace(/-/g, '').slice(0, 12);
-const sequence = (f: Form) => ['kind','number', ...(f.kind === 'commercial' ? ['business_name','entrance'] : []), 'floor','name','phone','role','review'];
+const sequence = (f: Form) => ['kind', ...(f.kind === 'commercial' ? ['business_name'] : ['number','floor']),
+  ...(f.ask_name !== false ? ['name'] : []), ...(f.ask_phone !== false ? ['phone'] : []), 'role','review'];
+async function contactDefaults(env: Env, uid: number): Promise<Partial<Form>> {
+  const profile = await env.HOME_DB.prepare('SELECT name,phone FROM profiles WHERE user_id=?').bind(uid).first<{name:string;phone:string}>();
+  const name = profile?.name?.trim(); const phone = ukrainianPhone(profile?.phone || '');
+  return { ask_name: !name || name.length < 2, ask_phone: !phone, ...(name && name.length >= 2 ? {name} : {}), ...(phone ? {phone} : {}) };
+}
+function firstIncomplete(f: Form): string {
+  if (!f.kind) return 'kind';
+  if (f.kind === 'commercial') { if (!f.business_name) return 'business_name'; }
+  else { if (!f.number) return 'number'; if (f.floor === undefined) return 'floor'; }
+  if (!f.name) return 'name'; if (!ukrainianPhone(f.phone || '')) return 'phone';
+  return f.role ? 'review' : 'role';
+}
+async function normalizeSession(env: Env, s: Session): Promise<Session> {
+  const f = JSON.parse(s.data) as Form;
+  if (f.ask_name === undefined || f.ask_phone === undefined) Object.assign(f, await contactDefaults(env,s.user_id));
+  if (f.kind === 'commercial') {
+    delete f.entrance; delete f.floor;
+    if (f.business_name) f.number = commercialKey(f.business_name); else delete f.number;
+  }
+  const step = sequence(f).includes(s.step) ? s.step : firstIncomplete(f);
+  const data = JSON.stringify(f);
+  if (data !== s.data || step !== s.step) await env.HOME_DB.prepare('UPDATE sessions SET step=?,data=? WHERE user_id=? AND token=?').bind(step,data,s.user_id,s.token).run();
+  return {...s,step,data};
+}
 const cancel = (s: Session): Button[] => [{ text: '✕ Скасувати', callback_data: `reg:cancel:${s.token}` }];
 function plainCard(env: Env, uid: number | string, text: string, buttons?: Button[][]) {
   const [heading,...rest] = text.split('\n');
   return sendHtml(env, uid, `<b>${escapeHtml(heading)}</b>\n${escapeHtml(rest.join('\n'))}`, buttons);
 }
 function description(f: Form) {
-  return `${f.kind === 'commercial' ? '🏪 Приміщення' : '🏠 Квартира'} ${f.number}\n${f.kind === 'commercial' ? `Назва: ${f.business_name}\n` : ''}Під’їзд: ${f.entrance} · Поверх: ${f.floor}\n\n👤 ${f.name}\n📱 ${f.phone}\n🔑 ${roleLabel(f.role || '')}`;
+  const property = f.kind === 'commercial' ? `🏪 ${f.business_name}` : `🏠 Квартира ${f.number}\nПід’їзд: ${f.entrance} · Поверх: ${f.floor}`;
+  return `${property}\n\n👤 ${f.name}\n📱 ${f.phone}\n🔑 ${roleLabel(f.role || '')}`;
 }
 async function showForm(env: Env, s: Session) {
   const f = JSON.parse(s.data) as Form;
@@ -30,13 +56,12 @@ async function showForm(env: Env, s: Session) {
     [{ text: '✏️ Заповнити заново', callback_data: `reg:restart:${s.token}` }], cancel(s),
   ]);
   const steps = sequence(f); const i = steps.indexOf(s.step);
-  const min = f.kind === 'commercial' ? (f.entrance === 1 ? 1 : 0) : (f.entrance === 1 ? 2 : 1);
+  const min = f.entrance === 1 ? 2 : 1;
   const max = f.entrance === 1 ? 14 : f.entrance === 2 ? 9 : 10;
   const prompts: Record<string,string> = {
     kind: 'Що бажаєте зареєструвати?\nОберіть тип приміщення кнопкою.',
-    number: f.kind === 'commercial' ? 'Напишіть номер комерційного приміщення.\nНаприклад: 7-8 або 10-12. Об’єднане приміщення реєструється одним записом.' : 'Напишіть номер квартири від 1 до 187.\nНаприклад: 42. Під’їзд визначимо автоматично.',
+    number: 'Напишіть номер квартири від 1 до 187.\nНаприклад: 42. Під’їзд визначимо автоматично.',
     business_name: 'Як називається ваша комерція?\nНаприклад: Аптека або Кав’ярня. Від 2 до 100 символів.',
-    entrance: 'У якому під’їзді розташоване приміщення?\nНапишіть цифру: 1, 2 або 3.',
     floor: `Під’їзд ${f.entrance} визначено.\nНа якому поверсі ви знаходитесь? Напишіть цифру від ${min} до ${max}.`,
     name: 'Напишіть ім’я та прізвище контактної особи.\nНаприклад: Олена Коваль.',
     phone: 'Напишіть український номер телефону.\nНаприклад: +380671234567 або 067 123 45 67.\nЗбережемо як +380671234567.',
@@ -66,14 +91,15 @@ export async function startRegistration(env: Env, uid: number, payload?: string)
     else return plainCard(env, uid, '🏡 Оберіть будинок\nДля нового будинку відкрийте реєстрацію з голосування у його групі. Для вже доданого приміщення використайте «Мої приміщення».');
   }
   if (!chatId || !isConnected(await getGroup(env, chatId))) return plainCard(env, uid, 'Будинок недоступний\nГрупу ще не підключено або від’єднано.');
-  const s: Session = { user_id: uid, chat_id: chatId, token: token(), step: 'kind', data: JSON.stringify({ poll_id: pollId }) };
+  const s: Session = { user_id: uid, chat_id: chatId, token: token(), step: 'kind', data: JSON.stringify({ poll_id: pollId, ...await contactDefaults(env,uid) }) };
   await env.HOME_DB.prepare("INSERT INTO sessions(user_id,chat_id,token,step,data) VALUES (?,?,?,'kind',?) ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id,token=excluded.token,step='kind',data=excluded.data,updated_at=unixepoch()")
     .bind(uid,chatId,s.token,s.data).run();
   return showForm(env,s);
 }
 export async function registrationMessage(env: Env, m: Message) {
-  const s = await env.HOME_DB.prepare('SELECT * FROM sessions WHERE user_id=?').bind(m.from!.id).first<Session>();
+  let s = await env.HOME_DB.prepare('SELECT * FROM sessions WHERE user_id=?').bind(m.from!.id).first<Session>();
   if (!s) return plainCard(env,m.from!.id,'🏡 Вітаємо!\nНатисніть /start або відкрийте голосування у групі будинку.');
+  s = await normalizeSession(env,s);
   if (!isConnected(await getGroup(env,s.chat_id))) return showForm(env,s);
   const f = JSON.parse(s.data) as Form; const value = (m.text || '').trim();
   if (s.step === 'number') {
@@ -81,14 +107,7 @@ export async function registrationMessage(env: Env, m: Message) {
       const number = apartmentNumber(value); const entrance = number ? entranceForApartment(number) : null;
       if (!number || !entrance) return plainCard(env,s.user_id,'🚪 Номер квартири не підходить\nНапишіть цифрами номер від 1 до 187.');
       f.number = number; f.entrance = entrance;
-    } else {
-      const number = commercialNumber(value);
-      if (!number) return plainCard(env,s.user_id,'🏪 Перевірте номер\nПриклад: 7-8 або 10-12. Використовуйте цифри й один дефіс; менший номер має бути першим.');
-      f.number = number.number;
     }
-  } else if (s.step === 'entrance') {
-    if (!/^[123]$/.test(value)) return plainCard(env,s.user_id,'Напишіть 1, 2 або 3\nЦе номер під’їзду вашого приміщення.');
-    f.entrance = Number(value);
   } else if (s.step === 'floor') {
     const floor = validFloor(f.kind!,f.entrance!,value);
     if (floor === null) { await plainCard(env,s.user_id,'Поверх не підходить для цього під’їзду\nВкажіть число з допустимого діапазону.'); return showForm(env,s); }
@@ -101,6 +120,7 @@ export async function registrationMessage(env: Env, m: Message) {
     const text = value.replace(/\s+/g,' ');
     if (text.length < 2 || text.length > 100 || text.startsWith('/')) return plainCard(env,s.user_id,'Потрібен текст від 2 до 100 символів\nСпробуйте ще раз.');
     f[s.step] = text;
+    if (s.step === 'business_name') f.number = commercialKey(text);
   } else return showForm(env,s);
   const steps = sequence(f);
   return save(env,s,f,steps[steps.indexOf(s.step)+1]);
@@ -127,15 +147,10 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
     if (action === 'approve') {
       if (!ukrainianPhone(m.phone)) { await answer(env,q.id,'Потрібен український номер телефону.'); return true; }
       const verified = await env.HOME_DB.prepare("SELECT COUNT(*) AS n FROM memberships WHERE premise_id=? AND status='approved'").bind(m.id).first<{n:number}>();
-      if (verified?.n && ((m.floor !== null && f.floor !== m.floor) || (m.entrance !== null && f.entrance !== m.entrance))) {
+      if (m.kind === 'apartment' && verified?.n && ((m.floor !== null && f.floor !== m.floor) || (m.entrance !== null && f.entrance !== m.entrance))) {
         await answer(env,q.id,'Під’їзд або поверх не збігається з уже підтвердженим приміщенням. Відхиліть заявку та уточніть дані.'); return true;
       }
-      if (m.kind === 'commercial') {
-        const overlap = await env.HOME_DB.prepare(`SELECT p.id FROM premises p JOIN memberships a ON a.premise_id=p.id
-          WHERE p.chat_id=? AND p.kind='commercial' AND p.id!=? AND a.status='approved'
-          AND p.number_start<=? AND p.number_end>=? LIMIT 1`).bind(m.chat_id,m.id,m.number_end,m.number_start).first();
-        if (overlap) { await answer(env,q.id,'Номери перетинаються з уже підтвердженим комерційним приміщенням. Уточніть об’єднання.'); return true; }
-      }
+
     }
     await env.HOME_DB.batch([
       env.HOME_DB.prepare("UPDATE memberships SET status=?,reviewed_by=?,reviewed_at=unixepoch(),version=version+1 WHERE id=? AND status='pending' AND application_token=?").bind(action === 'approve' ? 'approved' : 'rejected',q.from.id,m.membership_id,m.application_token),
@@ -147,8 +162,9 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
     await plainCard(env,m.user_id,action === 'approve' ? `🎉 Доступ підтверджено\n${premiseLabel(m)}\n\nВи можете голосувати від цього приміщення. Натисніть /menu, щоб відкрити свої дані та список мешканців.` : `Заявку відхилено\n${premiseLabel(m)}\n\nУточніть дані з адміністратором і подайте заявку знову.`);
     return true;
   }
-  const s = await env.HOME_DB.prepare('SELECT * FROM sessions WHERE user_id=? AND token=?').bind(q.from.id,value || '').first<Session>();
+  let s = await env.HOME_DB.prepare('SELECT * FROM sessions WHERE user_id=? AND token=?').bind(q.from.id,value || '').first<Session>();
   if (!s) { await answer(env,q.id,'Ця анкета вже недоступна. Почніть нову реєстрацію.'); return true; }
+  s = await normalizeSession(env,s);
   let f = JSON.parse(s.data) as Form;
   if (action === 'cancel') {
     await env.HOME_DB.prepare('DELETE FROM sessions WHERE user_id=? AND token=?').bind(s.user_id,s.token).run();
@@ -157,8 +173,9 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
   if (!isConnected(await getGroup(env,s.chat_id))) { await answer(env,q.id,'Групу від’єднано.'); return true; }
   if (action === 'restart') {
     const nextToken = token();
-    await env.HOME_DB.prepare("UPDATE sessions SET token=?,step='kind',data=?,updated_at=unixepoch() WHERE user_id=? AND token=?").bind(nextToken,JSON.stringify({poll_id:f.poll_id}),s.user_id,s.token).run();
-    await answer(env,q.id,'Почнемо заново.'); await showForm(env,{...s,token:nextToken,step:'kind',data:JSON.stringify({poll_id:f.poll_id})}); return true;
+    const defaults = await contactDefaults(env,s.user_id);
+    await env.HOME_DB.prepare("UPDATE sessions SET token=?,step='kind',data=?,updated_at=unixepoch() WHERE user_id=? AND token=?").bind(nextToken,JSON.stringify({poll_id:f.poll_id,...defaults}),s.user_id,s.token).run();
+    await answer(env,q.id,'Почнемо заново.'); await showForm(env,{...s,token:nextToken,step:'kind',data:JSON.stringify({poll_id:f.poll_id,...defaults})}); return true;
   }
   if (action === 'back') {
     const steps = sequence(f); const index = steps.indexOf(s.step);
@@ -166,21 +183,29 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
     else await answer(env,q.id,'Це перший крок.'); return true;
   }
   if (action === 'kind' && s.step === 'kind' && ['apartment','commercial'].includes(extra)) {
-    f = { kind: extra as Form['kind'], poll_id: f.poll_id };
-    await answer(env,q.id,'Тип обрано.'); await save(env,s,f,'number'); return true;
+    f = { kind: extra as Form['kind'], poll_id: f.poll_id, ...await contactDefaults(env,s.user_id) };
+    await answer(env,q.id,'Тип обрано.'); await save(env,s,f,f.kind === 'commercial' ? 'business_name' : 'number'); return true;
   }
   if (action === 'role' && s.step === 'role' && ['owner','tenant'].includes(extra)) {
     f.role = extra as Form['role']; await answer(env,q.id,'Перевірте анкету.'); await save(env,s,f,'review'); return true;
   }
-  if (action !== 'submit' || s.step !== 'review' || !f.kind || !f.number || !f.entrance || f.floor === undefined ||
-    validFloor(f.kind,f.entrance,String(f.floor)) === null || !f.name || !ukrainianPhone(f.phone || '') || !f.role || (f.kind === 'commercial' && !f.business_name)) {
+  const validProperty = f.kind === 'commercial' ? !!f.business_name && f.number === commercialKey(f.business_name)
+    : !!f.number && !!f.entrance && f.floor !== undefined && entranceForApartment(f.number) === f.entrance && validFloor('apartment',f.entrance,String(f.floor)) !== null;
+  if (action !== 'submit' || s.step !== 'review' || !f.kind || !validProperty || !f.name || !ukrainianPhone(f.phone || '') || !f.role) {
     await answer(env,q.id,'Спочатку заповніть усі поля анкети.'); return true;
   }
-  const range = f.kind === 'commercial' ? commercialNumber(f.number) : { start:Number(f.number),end:Number(f.number) };
-  if (!range || (f.kind === 'apartment' && entranceForApartment(f.number) !== f.entrance)) { await answer(env,q.id,'Некоректний номер або під’їзд.'); return true; }
-  await env.HOME_DB.prepare('INSERT INTO premises(chat_id,kind,number,business_name,entrance,floor,number_start,number_end) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(chat_id,kind,number) DO NOTHING')
-    .bind(s.chat_id,f.kind,f.number,f.business_name || '',f.entrance,f.floor,range.start,range.end).run();
-  const p = await env.HOME_DB.prepare('SELECT * FROM premises WHERE chat_id=? AND kind=? AND number=?').bind(s.chat_id,f.kind,f.number).first<Premise>();
+  let p = await env.HOME_DB.prepare('SELECT * FROM premises WHERE chat_id=? AND kind=? AND number=?').bind(s.chat_id,f.kind,f.number!).first<Premise>();
+  if (!p && f.kind === 'commercial') {
+    // Reuse numbered commerce created by the old form when the business name matches.
+    const old = (await env.HOME_DB.prepare("SELECT * FROM premises WHERE chat_id=? AND kind='commercial'").bind(s.chat_id).all<Premise>()).results;
+    p = old.find(item => commercialKey(item.business_name) === f.number) || null;
+  }
+  if (!p) {
+    const number = f.kind === 'apartment' ? Number(f.number) : 0;
+    await env.HOME_DB.prepare('INSERT INTO premises(chat_id,kind,number,business_name,entrance,floor,number_start,number_end) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(chat_id,kind,number) DO NOTHING')
+      .bind(s.chat_id,f.kind,f.number!,f.business_name || '',f.kind === 'apartment' ? f.entrance! : null,f.kind === 'apartment' ? f.floor! : null,number,number).run();
+    p = await env.HOME_DB.prepare('SELECT * FROM premises WHERE chat_id=? AND kind=? AND number=?').bind(s.chat_id,f.kind,f.number!).first<Premise>();
+  }
   if (!p) throw new Error('Premise creation failed');
   const existing = await env.HOME_DB.prepare('SELECT status FROM memberships WHERE user_id=? AND premise_id=?').bind(s.user_id,p.id).first<{status:string}>();
   if (existing && ['approved','pending'].includes(existing.status)) {

@@ -1,0 +1,14 @@
+name = "homebot"
+main = "src/index.ts"
+compatibility_date = "2026-11-07"
+keep_vars = true
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "HOME_DB"
+database_name = "995be77b-c07c-43f4-8244-4b2dd42584b1"
+# Replace after: npx wrangler d1 create homebot
+database_id = "995be77b-c07c-43f4-8244-4b2dd42584b1"
+migrations_dir = "migrations"

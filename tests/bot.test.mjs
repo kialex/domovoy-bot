@@ -513,7 +513,7 @@ test('expired votes are rejected immediately; scheduler posts one compact outcom
     const done=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(p.id);assert.equal(done.status,'closed');assert.equal(done.next_repost_at,null);assert.ok(done.result_message_id);assert.equal(done.message_id,done.result_message_id);
     const actions=h.calls.slice(start);const outcomeIndex=actions.findIndex(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id);const deleteIndex=actions.findIndex(c=>c.method==='deleteMessage'&&c.message_id===p.message_id);
     assert.ok(outcomeIndex>=0&&deleteIndex>outcomeIndex);const outcome=actions[outcomeIndex];assert.equal(outcome.reply_markup,undefined);
-    assert.ok(outcome.text.includes(`${'🟩'.repeat(5)} <b>Yes — 1 · 100%</b>`));assert.match(outcome.text,/Найбільше голосів/);assert.match(outcome.text,/Київ/);assert.ok(!outcome.text.includes('Person 2'));
+    assert.ok(outcome.text.includes(`<code>━━━━━━━━━━</code> <b>Yes — 1 · 100%</b>`));assert.match(outcome.text,/Найбільше голосів/);assert.match(outcome.text,/Київ/);assert.ok(!outcome.text.includes('Person 2'));
     const before=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length;
     await scheduledReposts(h.env);await closePoll(h,p.id);assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length,before);
   }finally{h.close();}
@@ -584,5 +584,48 @@ test('closing requires a fresh private confirmation for the chosen poll',async()
   const before=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length;
   await h.cb(1,`pollctl:close:${p.id}:${old}`);
   assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length,before);
+ }finally{h.close();}
+});
+
+test('poll cards use ten-segment text bars and omit internal poll numbers',()=>{
+ for(const closed of [false,true]){
+  const text=pollCard(987,'Question',['Yes','No'],new Map([[0,1],[1,1]]),closed);
+  assert.ok(!text.includes('987'));assert.ok(!text.includes('№'));
+  assert.ok(!text.includes('🟩'));assert.ok(!text.includes('⬜'));
+  assert.equal(text.split('<code>━━━━━─────</code>').length-1,2);
+  assert.ok(text.includes('\n\n'));
+ }
+});
+
+test('admin report groups sorted apartments by entrance and answer, includes commerce and closed history',async()=>{
+ const h=harness();try{
+  await register(h,2,{number:'84a',floor:'14'});await register(h,3,{number:'95',floor:'3'});await register(h,4,{kind:'commercial',business:'Coffee <Bar>'});
+  const p=await poll(h);await cast(h,2,p,0);await cast(h,3,p,1);await cast(h,4,p,0);
+  const before=h.calls.length;await h.cb(2,`pollctl:results:${p.id}`);assert.equal(h.calls.slice(before).filter(c=>c.method==='sendMessage').length,0);
+  await h.cb(1,`pollctl:results:${p.id}`);let text=h.calls.at(-1).text;
+  assert.match(text,/Під’їзд 1/);assert.match(text,/Yes: 84А/);assert.match(text,/Під’їзд 2/);assert.match(text,/No: 95/);assert.match(text,/Комерція/);assert.match(text,/Coffee &lt;Bar&gt;/);assert.ok(!text.includes('+380'));assert.ok(!text.includes('№'));
+  await closePoll(h,p.id);await h.cb(1,'pollctl:list:0:closed');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`pollctl:show:${p.id}`));
+  await h.cb(1,`pollctl:results:${p.id}`);assert.match(h.calls.at(-1).text,/Yes: 84А/);
+ }finally{h.close();}
+});
+
+test('poll deletion is private, confirmed, closed-only and removes dependent data without residents',async()=>{
+ const h=harness();try{
+  await register(h,2);const p=await poll(h);await cast(h,2,p,0);
+  const exists=()=>!!h.sqlite.prepare('SELECT id FROM polls WHERE id=?').get(p.id);
+  await h.cb(1,`pollctl:askdelete:${p.id}`);assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM poll_delete_confirmations').get().n,0);
+  await closePoll(h,p.id);
+  const token=()=>h.sqlite.prepare('SELECT token FROM poll_delete_confirmations WHERE poll_id=?').get(p.id)?.token;
+  await h.cb(1,`pollctl:askdelete:${p.id}`);const canceled=token();
+  await h.cb(1,`pollctl:canceldelete:${p.id}`);await h.cb(1,`pollctl:delete:${p.id}:${canceled}`);assert.ok(exists());
+  await h.cb(1,`pollctl:askdelete:${p.id}`);const expired=token();h.sqlite.prepare('UPDATE poll_delete_confirmations SET expires_at=0').run();
+  await h.cb(1,`pollctl:delete:${p.id}:${expired}`);assert.ok(exists());
+  await h.cb(1,`pollctl:askdelete:${p.id}`);const valid=token();
+  await h.cb(2,`pollctl:delete:${p.id}:${valid}`);assert.ok(exists());
+  h.sqlite.exec('PRAGMA foreign_keys=ON');
+  await h.cb(1,`pollctl:delete:${p.id}:${valid}`);assert.ok(!exists());
+  for(const table of ['premise_votes','vote_intents','poll_message_cleanup','poll_repost_runs','poll_close_confirmations','poll_delete_confirmations'])assert.equal(h.sqlite.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE poll_id=?`).get(p.id).n,0);
+  assert.equal(h.member(2,'25').status,'approved');
+  await h.cb(1,`pollctl:delete:${p.id}:${valid}`);assert.ok(!exists());
  }finally{h.close();}
 });

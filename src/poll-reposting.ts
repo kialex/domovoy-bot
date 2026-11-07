@@ -1,3 +1,4 @@
+import { adminPollReport } from './poll-report.ts';
 import type { Button, Callback, Env } from './env.ts';
 import { getGroup, isConnected } from './groups.ts';
 import { answer, send, sendHtml, telegram, TelegramError } from './telegram.ts';
@@ -13,20 +14,22 @@ interface RepostPoll {
 export async function pollControls(env:Env,id:number) {
   const p=await env.HOME_DB.prepare('SELECT * FROM polls WHERE id=?').bind(id).first<RepostPoll>();
   if(!p||p.status==='draft')return send(env,env.ADMIN_TELEGRAM_USER_ID,'Голосування не знайдено.');
-  const buttons:Button[][]=[[{text:'📊 Результати',callback_data:`pollctl:results:${id}`}]];
+  const buttons:Button[][]=[[{text:'📊 Звіт',callback_data:`pollctl:results:${id}`}]];
   if(p.status==='open')buttons.push([{text:'⬆️ Підняти зараз',callback_data:`pollctl:raise:${id}`}],[{text:'🏁 Завершити голосування',callback_data:`pollctl:askclose:${id}`}]);
   buttons.push([{text:'← Мої голосування',callback_data:'pollctl:list:0'},{text:'🏠 Головне меню',callback_data:'resident:menu:0'}]);
-  return sendHtml(env,env.ADMIN_TELEGRAM_USER_ID,`🗳 <b>Голосування №${id}</b>\n\n${escapeHtml(p.question)}\n\nСтатус: ${p.status==='open'?'відкрите':'завершено'}\nАвтопідняття: ${escapeHtml(intervalLabel(p.repost_interval))}\n📅 Строк: ${p.ends_at?kyivDate(p.ends_at)+' (Київ)':'без строку'}\n\nПідняття публікує нове повідомлення зі збереженими голосами й прибирає старе.`,buttons);
+  return sendHtml(env,env.ADMIN_TELEGRAM_USER_ID,`🗳 <b>Голосування</b>\n\n${escapeHtml(p.question)}\n\nСтатус: ${p.status==='open'?'відкрите':'завершено'}\nАвтопідняття: ${escapeHtml(intervalLabel(p.repost_interval))}\n📅 Строк: ${p.ends_at?kyivDate(p.ends_at)+' (Київ)':'без строку'}\n\nПідняття публікує нове повідомлення зі збереженими голосами й прибирає старе.`,buttons);
 }
-export async function adminPollList(env:Env,page=0) {
-  const {results}=await env.HOME_DB.prepare("SELECT id,question FROM polls WHERE status='open' ORDER BY id DESC LIMIT 9 OFFSET ?").bind(page*8).all<{id:number;question:string}>();
-  const buttons:Button[][]=results.slice(0,8).map(p=>[{text:`№${p.id} · ${p.question}`.slice(0,60),callback_data:`pollctl:show:${p.id}`}]);
+export async function adminPollList(env:Env,page=0,status='open') {
+  status=status==='closed'?'closed':'open';
+  const {results}=await env.HOME_DB.prepare("SELECT id,question FROM polls WHERE status=? ORDER BY id DESC LIMIT 9 OFFSET ?").bind(status,page*8).all<{id:number;question:string}>();
+  const buttons:Button[][]=results.slice(0,8).map(p=>[{text:`${p.question}`.slice(0,60),callback_data:`pollctl:show:${p.id}`}]);
+  buttons.unshift([{text:status==='open'?'✓ Активні':'Активні',callback_data:'pollctl:list:0:open'},{text:status==='closed'?'✓ Завершені':'Завершені',callback_data:'pollctl:list:0:closed'}]);
   const nav:Button[]=[];
-  if(page>0)nav.push({text:'← Назад',callback_data:`pollctl:list:${page-1}`});
-  if(results.length>8)nav.push({text:'Далі →',callback_data:`pollctl:list:${page+1}`});
+  if(page>0)nav.push({text:'← Назад',callback_data:`pollctl:list:${page-1}:${status}`});
+  if(results.length>8)nav.push({text:'Далі →',callback_data:`pollctl:list:${page+1}:${status}`});
   if(nav.length)buttons.push(nav);
   buttons.push([{text:'🏠 Головне меню',callback_data:'resident:menu:0'}]);
-  return send(env,env.ADMIN_TELEGRAM_USER_ID,results.length?'🗳 Керування голосуваннями\nОберіть голосування, щоб підняти його або завершити.':'Відкритих голосувань немає.',buttons);
+  return send(env,env.ADMIN_TELEGRAM_USER_ID,results.length?'🗳 Оберіть голосування для перегляду звіту та керування.':status==='closed'?'Завершених голосувань немає.':'Відкритих голосувань немає.',buttons);
 }
 function currentLink(p:RepostPoll) {
   const chat=String(p.chat_id);
@@ -55,7 +58,7 @@ export async function cleanupPollCopies(env:Env,pollId?:number) {
         }
         const link=currentLink({chat_id:copy.chat_id,message_id:copy.current_message_id} as RepostPoll);
         await telegram(env,'editMessageText',{chat_id:copy.chat_id,message_id:copy.message_id,
-          text:`⬆️ Голосування №${copy.poll_id} перенесено.\n${link?'Відкрийте актуальне повідомлення кнопкою нижче.':'Актуальне голосування розташоване нижче в чаті.'}`,
+          text:`⬆️ Голосування перенесено.\n${link?'Відкрийте актуальне повідомлення кнопкою нижче.':'Актуальне голосування розташоване нижче в чаті.'}`,
           reply_markup:{inline_keyboard:link?[[{text:'Перейти до голосування',url:link}]]:[]}});
         await env.HOME_DB.prepare('UPDATE poll_message_cleanup SET redirected_to=? WHERE poll_id=? AND message_id=?').bind(copy.current_message_id,copy.poll_id,copy.message_id).run();
       }catch{console.error('Poll redirect deferred',{pollId:copy.poll_id,messageId:copy.message_id});}
@@ -119,7 +122,7 @@ export async function pollControlCallback(env:Env,q:Callback,updateId:number):Pr
   const [,action,raw,confirmationToken]=q.data.split(':');
   if(action==='list'){
     const page=Number(raw);if(!Number.isSafeInteger(page)||page<0||page>100000){await answer(env,q.id,'Недоступна сторінка.');return true;}
-    await answer(env,q.id,'Керування голосуваннями.');await adminPollList(env,page);return true;
+    await answer(env,q.id,'Керування голосуваннями.');await adminPollList(env,page,confirmationToken);return true;
   }
   const id=positiveId(raw);if(!id){await answer(env,q.id,'Невідоме голосування.');return true;}
   if(action==='raise'){
@@ -128,8 +131,28 @@ export async function pollControlCallback(env:Env,q:Callback,updateId:number):Pr
     await send(env,q.from.id,result==='raised'||result==='already'?'✅ Голосування піднято. Усі голоси збережено.':result==='busy'?'Голосування вже піднімається. Спробуйте за хвилину.':'Це голосування вже закрито або групу від’єднано.');
     await pollControls(env,id);return true;
   }
+  if(action==='askdelete'){
+    const p=await env.HOME_DB.prepare("SELECT question FROM polls WHERE id=? AND status='closed'").bind(id).first<{question:string}>();
+    if(!p){await answer(env,q.id,'Видалити можна лише завершене голосування.');return true;}
+    const token=crypto.randomUUID().replace(/-/g,'').slice(0,16);
+    await env.HOME_DB.prepare(`INSERT INTO poll_delete_confirmations VALUES (?,?,?,unixepoch()+300) ON CONFLICT(user_id,poll_id) DO UPDATE SET token=excluded.token,expires_at=excluded.expires_at`).bind(token,q.from.id,id).run();
+    await answer(env,q.id,'Перевірте питання.');
+    await sendHtml(env,q.from.id,`🗑 <b>Видалити голосування?</b>\n\n${escapeHtml(p.question)}\n\nПитання, голоси та статистику буде видалено з бази назавжди. Дані мешканців залишаться. Повідомлення в групі залишаться.`,[[{text:'Залишити',callback_data:`pollctl:canceldelete:${id}`}],[{text:'Так, видалити назавжди',callback_data:`pollctl:delete:${id}:${token}`}]]);return true;
+  }
+  if(action==='canceldelete'){
+    await env.HOME_DB.prepare('DELETE FROM poll_delete_confirmations WHERE user_id=? AND poll_id=?').bind(q.from.id,id).run();await answer(env,q.id,'Голосування збережено.');await adminPollReport(env,id);return true;
+  }
+  if(action==='delete'){
+    const guard=`EXISTS (SELECT 1 FROM poll_delete_confirmations c JOIN polls p ON p.id=c.poll_id WHERE c.token=? AND c.user_id=? AND c.poll_id=? AND c.expires_at>unixepoch() AND p.status='closed' AND (p.repost_lease_until IS NULL OR p.repost_lease_until<unixepoch()))`;
+    const args=[confirmationToken||'',q.from.id,id];
+    const tables=['premise_votes','votes','vote_intents','poll_repost_runs','poll_message_cleanup','poll_close_confirmations'];
+    const results=await env.HOME_DB.batch([...tables.map(table=>env.HOME_DB.prepare(`DELETE FROM ${table} WHERE poll_id=? AND ${guard}`).bind(id,...args)),env.HOME_DB.prepare(`DELETE FROM polls WHERE id=? AND ${guard}`).bind(id,...args)]);
+    const deleted=!!results.at(-1)?.meta.changes;
+    await answer(env,q.id,deleted?'Голосування видалено.':'Підтвердження застаріло або голосування обробляється. Відкрийте його ще раз.');
+    if(deleted)await adminPollList(env,0,'closed');return true;
+  }
   const {pollResults}=await import('./polls.ts');
-  if(action==='results'){await answer(env,q.id,'Результати.');await pollResults(env,id,false);return true;}
+  if(action==='results'){await answer(env,q.id,'Результати.');await adminPollReport(env,id);return true;}
   if(action==='askclose'){
     const poll=await env.HOME_DB.prepare('SELECT * FROM polls WHERE id=?').bind(id).first<RepostPoll>();
     if(!poll||poll.status!=='open'){await answer(env,q.id,'Це голосування вже завершено.');await pollControls(env,id);return true;}

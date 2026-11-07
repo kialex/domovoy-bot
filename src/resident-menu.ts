@@ -59,7 +59,7 @@ export async function availablePolls(env:Env,uid:number,page=0) {
   if(!results.length)return send(env,uid,'🗳 Відкритих голосувань поки немає\nТут з’являться голосування груп, де у вас є підтверджене приміщення.');
   for(const p of results.slice(0,8)){
     const link=pollLink(p.chat_id,p.message_id);
-    await send(env,uid,`🗳 №${p.id} · ${p.title}\n${p.question}\n\n${link?'Відкрийте повідомлення у групі, щоб обрати відповідь.':'Відкрийте це голосування у групі будинку.'}`,link?[[{text:'Перейти до голосування',url:link}]]:undefined);
+    await send(env,uid,`🗳 ${p.title}\n${p.question}\n\n${link?'Відкрийте повідомлення у групі, щоб обрати відповідь.':'Відкрийте це голосування у групі будинку.'}`,link?[[{text:'Перейти до голосування',url:link}]]:undefined);
   }
   if(results.length>8)await send(env,uid,'Наступні голосування',[[{text:'Далі →',callback_data:`resident:polls:${page+1}`}]]);
 }

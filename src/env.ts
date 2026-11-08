@@ -6,7 +6,7 @@ export interface Env {
   TELEGRAM_WEBHOOK_SECRET: string;
   ADMIN_TELEGRAM_USER_ID: string;
 }
-export interface User { id: number; is_bot?: boolean }
+export interface User { id: number; is_bot?: boolean; username?: string }
 export interface Message {
   message_id: number;
   chat: { id: number; type: string };

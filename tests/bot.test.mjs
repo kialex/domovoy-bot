@@ -604,7 +604,7 @@ test('admin report groups sorted apartments by entrance and answer, includes com
  const h=harness();try{
   await register(h,2,{number:'84a',floor:'14'});await register(h,3,{number:'95',floor:'3'});await register(h,4,{kind:'commercial',business:'Coffee <Bar>'});
   const p=await poll(h);await cast(h,2,p,0);await cast(h,3,p,1);await cast(h,4,p,0);
-  const before=h.calls.length;await h.cb(2,`pollctl:results:${p.id}`);assert.equal(h.calls.slice(before).filter(c=>isSend(c.method)).length,0);
+  const before=h.calls.length;await h.cb(2,`pollctl:results:${p.id}`);assert.equal(h.calls.slice(before).filter(c=>isSend(c.method)||c.method==='editMessageText').length,0);
   await h.cb(1,`pollctl:results:${p.id}`);let text=h.calls.at(-1).text;
   assert.match(text,/Під’їзд 1/);assert.match(text,/Yes: 84А/);assert.match(text,/Під’їзд 2/);assert.match(text,/No: 95/);assert.match(text,/Комерція/);assert.match(text,/Coffee &lt;Bar&gt;/);assert.ok(!text.includes('+380'));assert.ok(!text.includes('№'));
   await closePoll(h,p.id);await h.cb(1,'pollctl:list:0:closed');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`pollctl:show:${p.id}`));
@@ -690,7 +690,9 @@ test('admin directory opens other apartments, contacts and confirmed owner revoc
  const h=harness();try{
   const m=await register(h,2,{number:'95',floor:'3'});const p=await poll(h);await cast(h,2,p,0);
   await h.msg(1,'🏠 Головне меню');assert.ok(h.calls.at(-1).reply_markup.keyboard.flat().some(b=>b.text==='👥 Мешканці будинку'));
-  await h.msg(1,'👥 Мешканці будинку');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`directory:members:${m.premise_id}:0`));
+  await h.msg(1,'👥 Мешканці будинку');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='directory:tree:-100001:2:-:0:0'));
+  await h.cb(1,'directory:tree:-100001:2:-:0:0');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='directory:tree:-100001:2:3:0:0'));
+  await h.cb(1,'directory:tree:-100001:2:3:0:0');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`directory:tree:-100001:2:3:${m.premise_id}:0`));
   await h.cb(1,`directory:members:${m.premise_id}:0`);assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`directory:person:${m.id}`));
   await h.cb(1,`directory:person:${m.id}`);assert.match(h.calls.at(-1).text,/Person 2/);assert.match(h.calls.at(-1).text,/Власник/);assert.match(h.calls.at(-1).text,/\+380671234567/);
   assert.equal(h.member(1,'95'),undefined);
@@ -703,12 +705,12 @@ test('directory protects foreign contacts, isolates houses, paginates and reject
  const h=harness(2);try{
   const a=await register(h,2);const b=await register(h,3,{number:'95',floor:'3',chat:-100002});
   await h.msg(1,'👥 Мешканці будинку');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='directory:house:-100002:0'));
-  await h.cb(1,'directory:house:-100001:0');let buttons=h.calls.at(-1).reply_markup.inline_keyboard.flat();assert.ok(buttons.some(x=>x.callback_data===`directory:members:${a.premise_id}:0`));assert.ok(!buttons.some(x=>x.callback_data===`directory:members:${b.premise_id}:0`));
-  for(const uid of [2,3]){const before=h.calls.length;await h.cb(uid,`directory:person:${b.id}`);assert.equal(h.calls.slice(before).filter(c=>isSend(c.method)).length,0);}
-  const before=h.calls.length;await h.cb(1,`directory:person:${b.id}`,{message_id:1,chat:{id:-100002,type:'supergroup'}});assert.equal(h.calls.slice(before).filter(c=>isSend(c.method)).length,0);
+  await h.cb(1,'directory:tree:-100001:1:2:0:0');let buttons=h.calls.at(-1).reply_markup.inline_keyboard.flat();assert.ok(buttons.some(x=>x.callback_data===`directory:tree:-100001:1:2:${a.premise_id}:0`));assert.ok(!buttons.some(x=>x.callback_data.includes(`:${b.premise_id}:0`)));
+  for(const uid of [2,3]){const before=h.calls.length;await h.cb(uid,`directory:person:${b.id}`);assert.equal(h.calls.slice(before).filter(c=>isSend(c.method)||c.method==='editMessageText').length,0);}
+  const before=h.calls.length;await h.cb(1,`directory:person:${b.id}`,{message_id:1,chat:{id:-100002,type:'supergroup'}});assert.equal(h.calls.slice(before).filter(c=>isSend(c.method)||c.method==='editMessageText').length,0);
   for(let i=30;i<39;i++)await register(h,10+i,{number:String(i)});
-  await h.cb(1,'directory:house:-100001:0');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(x=>x.callback_data==='directory:house:-100001:1'));
-  await h.cb(1,'directory:house:-100001:1');assert.match(h.calls.at(-1).text,/Оберіть квартиру/);
+  await h.cb(1,'directory:tree:-100001:1:2:0:0');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(x=>x.callback_data==='directory:tree:-100001:1:2:0:1'));
+  await h.cb(1,'directory:tree:-100001:1:2:0:1');assert.match(h.calls.at(-1).text,/Кв\./);
   h.sqlite.prepare("UPDATE groups SET status='disconnected' WHERE chat_id=-100002").run();
   await h.cb(1,`directory:person:${b.id}`);assert.equal(h.calls.at(-1).text,'Мешканець недоступний.');
  }finally{h.close();}
@@ -1320,4 +1322,57 @@ test('short report requests can use a replied poll as context without sending it
     assert.equal(calls[0].input.tools.length,2);assert.doesNotMatch(JSON.stringify(calls),/private quoted text/);
     assert.match(h.calls.find(c=>isSend(c.method)).text,/Статистика голосування/);
   }finally{h.close();}
+});
+
+test('resident tree expands in one message and displays roles, phones and Telegram usernames in the unit',async()=>{
+ const h=harness();try{
+  const owner=await register(h,2,{number:'25',floor:'2'});await register(h,3,{number:'25',floor:'2',role:'family'});
+  await h.dispatch({message:{message_id:101,chat:{id:2,type:'private'},from:{id:2,username:'Oleksandr'},text:'/id'}});
+  const target={message_id:555,chat:{id:1,type:'private'}};
+  h.calls.length=0;
+  for(const data of ['directory:house:-100001:0','directory:tree:-100001:1:-:0:0','directory:tree:-100001:1:2:0:0',`directory:tree:-100001:1:2:${owner.premise_id}:0`])await h.cb(1,data,target);
+  const edits=h.calls.filter(c=>c.method==='editMessageText');assert.equal(edits.length,4);assert.ok(edits.every(c=>c.message_id===555));assert.equal(h.calls.some(c=>isSend(c.method)),false);
+  const last=edits.at(-1);assert.match(last.text,/├──|└──/);assert.match(last.text,/Person 2 · @Oleksandr · Власник/);assert.match(last.text,/Person 3 · Член сім’ї/);assert.match(last.text,/📞 \+380671234567/);
+  assert.ok(last.reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`directory:person:${owner.id}`));
+  await h.cb(1,`directory:person:${owner.id}`,target);assert.match(h.calls.at(-1).text,/@Oleksandr/);
+  assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`directory:tree:-100001:1:2:${owner.premise_id}:0`));
+  await h.cb(1,'directory:tree:-100001:1:2:0:0',target);assert.doesNotMatch(h.calls.at(-1).text,/Person 2|380/);
+ }finally{h.close();}
+});
+test('resident tree supports commerce, missing legacy floors and resident pagination without leaking to groups',async()=>{
+ const h=harness(2);try{
+  const shop=await register(h,2,{kind:'commercial',business:'Кава & <чай>'});
+  const legacy=await register(h,3,{number:'84а'});h.sqlite.prepare('UPDATE premises SET floor=NULL WHERE id=?').run(legacy.premise_id);
+  for(let uid=4;uid<=7;uid++)await register(h,uid,{kind:'commercial',business:'Кава & <чай>',role:'tenant'});
+  const other=await register(h,8,{number:'95',floor:'3',chat:-100002});
+  await h.cb(1,'directory:tree:-100001:c:-:0:0');assert.match(h.calls.at(-1).text,/Кава &amp; &lt;чай&gt;/);
+  await h.cb(1,`directory:tree:-100001:c:-:${shop.premise_id}:0`);let out=h.calls.at(-1);
+  assert.match(out.text,/Person 2/);assert.doesNotMatch(out.text,/Person 8/);assert.ok(out.reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`directory:tree:-100001:c:-:${shop.premise_id}:1`));
+  await h.cb(1,`directory:tree:-100001:c:-:${shop.premise_id}:1`);out=h.calls.at(-1);assert.match(out.text,/Person 6|Person 7/);
+  await h.cb(1,'directory:tree:-100001:1:-:0:0');assert.match(h.calls.at(-1).text,/Поверх не вказано/);
+  await h.cb(1,`directory:tree:-100001:1:n:${legacy.premise_id}:0`);assert.match(h.calls.at(-1).text,/84А/);assert.match(h.calls.at(-1).text,/Person 3/);
+  await h.cb(1,`directory:tree:-100001:2:3:${other.premise_id}:0`);assert.doesNotMatch(h.calls.at(-1).text,/Person 8|380/);
+  for(const uid of [2,3]){
+    h.calls.length=0;await h.cb(uid,`directory:tree:-100001:c:-:${shop.premise_id}:0`);assert.equal(h.calls.filter(c=>isSend(c.method)||c.method==='editMessageText').length,0);
+  }
+  h.calls.length=0;await h.cb(1,`directory:tree:-100001:c:-:${shop.premise_id}:0`,{message_id:1,chat:{id:-100001,type:'supergroup'}});assert.equal(h.calls.filter(c=>isSend(c.method)||c.method==='editMessageText').length,0);
+  const {parseTreeState}=await import('../src/resident-tree.ts');
+  for(const input of [['-100001','c','-','Infinity','0'],['-100001','1','SQL','1','0'],['1','1','2','1','0'],['-100001','1','2','1','-1']])assert.equal(parseTreeState(input),null);
+ }finally{h.close();}
+});
+test('Telegram username is captured on registration, follows changes and removal, and does not change resident identity',async()=>{
+ const h=harness();try{
+  const original=h.dispatch.bind(h);let username='first_name';
+  h.dispatch=async update=>{
+    const from=update.message?.from||update.callback_query?.from;
+    if(from?.id===2){if(username)from.username=username;else delete from.username;}
+    return original(update);
+  };
+  const m=await register(h,2);const profile=()=>h.sqlite.prepare('SELECT * FROM profiles WHERE user_id=2').get();
+  assert.equal(profile().telegram_username,'first_name');const {name,phone}=profile();
+  username='new_name';await h.msg(2,'/id');assert.equal(profile().telegram_username,'new_name');
+  username='';await h.msg(2,'/id');assert.equal(profile().telegram_username,'');assert.equal(profile().name,name);assert.equal(profile().phone,phone);assert.equal(h.member(2,'25').id,m.id);
+  // Ordinary group chatter does not trigger profile synchronization.
+  username='group_name';await h.dispatch({message:{message_id:44,chat:{id:-100001,type:'supergroup'},from:{id:2},text:'привіт'}});assert.equal(profile().telegram_username,'');
+ }finally{h.close();}
 });

@@ -120,6 +120,11 @@ export default {
       }
       try {
         await handleUpdate(env, update);
+        const sender=update.message?.from||update.callback_query?.from;
+        if(sender&&!sender.is_bot&&(update.message?.chat.type==='private'||update.callback_query)){
+          const username=sender.username&&/^[A-Za-z0-9_]{1,32}$/.test(sender.username)?sender.username:'';
+          await env.HOME_DB.prepare('UPDATE profiles SET telegram_username=? WHERE user_id=? AND telegram_username<>?').bind(username,sender.id,username).run();
+        }
         await env.HOME_DB.prepare("UPDATE updates SET state='done' WHERE id=?").bind(update.update_id).run();
       } catch {
         await env.HOME_DB.prepare("DELETE FROM updates WHERE id=? AND state='processing'").bind(update.update_id).run();

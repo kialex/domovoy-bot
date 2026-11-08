@@ -7,6 +7,7 @@ export interface Premise {
   number_start: number; number_end: number;
 }
 export interface Membership extends Premise {
+  telegram_username?: string;
   group_title?: string; membership_id: number; user_id: number; role: 'owner' | 'tenant' | 'family'; status: string;
   version: number; name: string; phone: string; application_token: string; details: string;
 }

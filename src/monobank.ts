@@ -45,7 +45,7 @@ export async function clearMonoSetup(env:Env){
 export async function fundsMenu(env:Env){
   await clearMonoSetup(env);
   const rows=(await env.HOME_DB.prepare('SELECT * FROM mono_funds ORDER BY started_at DESC').all<Fund>()).results;
-  return telegram(env,'sendMessage',{chat_id:env.ADMIN_TELEGRAM_USER_ID,text:rows.length?'Ваші збори. Оберіть потрібний.':'Підключіть банку monobank.',reply_markup:{keyboard:[[{text:'➕ Додати збір'}],[{text:'🏠 Головне меню'}]],resize_keyboard:true,is_persistent:true}}).then(async()=>{
+  return telegram(env,'sendMessage',{chat_id:env.ADMIN_TELEGRAM_USER_ID,text:rows.length?'Ваші збори. Оберіть потрібний.':'Щоб підключити банку, натисніть «➕ Додати збір» унизу. Потім надішліть свій токен monobank — бот покаже ваші банки для вибору.',reply_markup:{keyboard:[[{text:'➕ Додати збір'}],[{text:'🏠 Головне меню'}]],resize_keyboard:true,is_persistent:true}}).then(async()=>{
     for(const f of rows)await fundCard(env,f);
   });
 }
@@ -63,7 +63,7 @@ export async function startMono(env:Env){
   if(other)return send(env,env.ADMIN_TELEGRAM_USER_ID,'Спочатку завершіть або скасуйте поточне заповнення.');
   await clearMonoSetup(env);
   await env.HOME_DB.prepare("INSERT INTO mono_setup(user_id,nonce,step,expires_at) VALUES (?,?,'token',unixepoch()+900)").bind(env.ADMIN_TELEGRAM_USER_ID,id()).run();
-  return telegram(env,'sendMessage',{chat_id:env.ADMIN_TELEGRAM_USER_ID,text:'Надішліть токен із api.monobank.ua. Повідомлення з токеном буде видалено.',reply_markup:{keyboard:[[{text:'✕ Скасувати заповнення'}]],resize_keyboard:true,is_persistent:true}});
+  return telegram(env,'sendMessage',{chat_id:env.ADMIN_TELEGRAM_USER_ID,text:'Надішліть свій токен monobank у цей чат.\n\nОтримати токен: api.monobank.ua → увійдіть через застосунок monobank → скопіюйте токен.\n\nПісля цього оберете банку зі списку. Повідомлення з токеном бот видалить.',reply_markup:{keyboard:[[{text:'✕ Скасувати заповнення'}]],resize_keyboard:true,is_persistent:true}});
 }
 export async function monoMessage(env:Env,m:Message){
   if(!m.from||!admin(env,m.from.id))return false;

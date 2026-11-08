@@ -79,17 +79,19 @@ function castStatement(env:Env,poll:Poll,uid:number,premiseId:number,option:numb
     WHERE p.id=? AND p.status='open' AND (p.ends_at IS NULL OR p.ends_at>unixepoch()) AND u.id=? AND m.user_id=? AND m.status='approved'
     AND profile.phone GLOB '+380[1-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]' AND g.status='approved' AND g.bot_present=1
     ON CONFLICT(poll_id,premise_id) DO UPDATE SET option_index=excluded.option_index,updated_at=unixepoch()
-    WHERE premise_votes.user_id=excluded.user_id`).bind(option,poll.id,premiseId,uid);
+    WHERE premise_votes.user_id=excluded.user_id AND premise_votes.option_index<>excluded.option_index`).bind(option,poll.id,premiseId,uid);
 }
 function voterLabel(name:string, role:string) {
   return `${name || 'Мешканець'} · ${['owner','tenant','family'].includes(role) ? roleLabel(role) : 'мешканець'}`;
 }
 async function alreadyVoted(env:Env,uid:number,pollId:number,premiseId:number) {
-  const old=await env.HOME_DB.prepare(`SELECT v.voter_name,v.voter_role FROM premise_votes v
+  const old=await env.HOME_DB.prepare(`SELECT v.user_id,v.option_index,v.voter_name,v.voter_role,poll.options FROM premise_votes v
+    JOIN polls poll ON poll.id=v.poll_id
     JOIN memberships viewer ON viewer.premise_id=v.premise_id JOIN premises p ON p.id=v.premise_id JOIN groups g ON g.chat_id=p.chat_id
     WHERE v.poll_id=? AND v.premise_id=? AND viewer.user_id=? AND viewer.status='approved' AND g.status='approved' AND g.bot_present=1`)
-    .bind(pollId,premiseId,uid).first<{voter_name:string;voter_role:string}>();
+    .bind(pollId,premiseId,uid).first<{user_id:number;option_index:number;voter_name:string;voter_role:string;options:string}>();
   if (!old) return 'Голосування недоступне або ваш доступ змінився.';
+  if(old.user_id===uid)return `Ви вже проголосували за «${(JSON.parse(old.options) as string[])[old.option_index]}». Якщо хочете змінити голос, оберіть іншу відповідь.`;
   const role = ['owner','tenant','family'].includes(old.voter_role) ? roleLabel(old.voter_role) : 'мешканець';
   const suffix = ` · ${role}\nЯкщо ваші думки не збігаються, зверніться до цієї людини та попросіть змінити свій голос.`;
   const name = (old.voter_name || 'Мешканець').slice(0,200 - 'Голос подав: '.length - suffix.length);
@@ -175,7 +177,10 @@ export async function privateVoteCallback(env:Env,q:Callback):Promise<boolean> {
   if(changed){
     receipt=selected.length===1?`✅ Голос від ${selected[0].kind==='apartment'?`квартири ${selected[0].number}`:`«${selected[0].business_name}»`} зараховано.`:`✅ Зараховано голосів: ${changed}.${selected.length>changed?' Інші приміщення вже голосували або доступ змінився.':''}`;
     await answer(env,q.id,'');
-  }else await answer(env,q.id,await alreadyVoted(env,q.from.id,poll.id,selected[0].id));
+  }else {
+    receipt=await alreadyVoted(env,q.from.id,poll.id,selected[0].id);
+    await answer(env,q.id,'');
+  }
   await openVoteIntent(env,q.from.id,token,0,receipt);return true;
 }
 export async function pollResults(env: Env, id: number, close: boolean) {

@@ -1047,3 +1047,23 @@ test('rich layout keeps summary above description and buttons under options, han
  assert.ok(card.indexOf('Yes')<card.indexOf('data="vote:17:0"'));assert.ok(card.indexOf('data="vote:17:0"')<card.indexOf('>No<'));
  const empty=richPollCard({title:'Empty',options:['Yes','No'],counts:[0,0],closed:true}).html;assert.match(empty,/Голосів не подано/);assert.ok(!empty.includes('<tg-button'));assert.ok(!empty.includes('NaN'));
 });
+
+ test('repeating the same vote keeps it unchanged and explains how to choose another answer',async()=>{
+  const h=harness();try{
+    await register(h,2);const p=await poll(h);
+    await cast(h,2,p,0);
+    h.sqlite.prepare('UPDATE premise_votes SET updated_at=123').run();
+    h.calls.length=0;await cast(h,2,p,0);
+    assert.match(h.calls.find(c=>c.method==='answerCallbackQuery').text,/Ви вже проголосували за «Yes».*оберіть іншу відповідь/);
+    assert.equal(currentVotes(h)[0].updated_at,123);
+    assert.equal(h.calls.some(c=>c.method==='editMessageText'),false);
+    await cast(h,2,p,1);assert.equal(currentVotes(h)[0].option_index,1);
+    assert.match(h.calls.at(-1).text,/Голос прийнято: No/);
+    await register(h,2,{number:'26'});
+    await cast(h,2,p,1);
+    const intent=h.sqlite.prepare('SELECT * FROM vote_intents WHERE user_id=2').get();
+    await h.cb(2,`cast:${intent.token}:${h.member(2,'25').premise_id}`);
+    assert.ok(h.calls.some(c=>isSend(c.method)&&c.text?.includes('Ви вже проголосували за «No»')));
+    assert.equal(currentVotes(h).length,1);
+  }finally{h.close();}
+});

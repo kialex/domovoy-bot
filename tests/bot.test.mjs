@@ -53,7 +53,7 @@ function harness(groups=1) {
   };
   return h;
 }
-async function register(h,uid,{number='25',kind='apartment',floor='2',entrance='1',business='Coffee & Co',role='owner',chat=-100001,approve=true,phone='067 123 45 67'}={}) {
+async function register(h,uid,{number='25',kind='apartment',floor='2',entrance='1',business='Coffee & Co',role='owner',chat=-100001,approve=true,phone=uid===2?'067 123 45 67':`067${String(1234565+uid).padStart(7,'0')}`}={}) {
   await h.cb(uid,`resident:add:${chat}`);
   const token=h.form(uid).token;
   await h.cb(uid,`reg:kind:${token}:${kind}`);
@@ -87,6 +87,49 @@ async function closePoll(h,id) {
 const groupMessage=p=>({message_id:p.message_id,chat:{id:p.chat_id,type:'supergroup'}});
 async function cast(h,uid,p,option){await h.cb(uid,`vote:${p.id}:${option}`,groupMessage(p));}
 const currentVotes=h=>h.sqlite.prepare('SELECT * FROM premise_votes ORDER BY premise_id').all();
+
+function importContact(h,number,phone='+380671234567',chat=-100001){
+  const n=Number(number);const entrance=n<=84?1:n<=133?2:3;
+  const pid=Number(h.sqlite.prepare("INSERT INTO premises(chat_id,kind,number,entrance,floor,number_start,number_end) VALUES (?,'apartment',?,?,2,?,?)").run(chat,number,entrance,n,n).lastInsertRowid);
+  h.sqlite.prepare("INSERT INTO imported_residents(premise_id,name,phone) VALUES (?,'Олена',?)").run(pid,phone);
+  return pid;
+}
+test('imported contacts appear without profile links; phone claims all apartments in this house only',async()=>{
+  const h=harness(2);try{
+    const pid=importContact(h,'25');importContact(h,'26');importContact(h,'27','+380671234567',-100002);
+    await h.cb(1,`directory:tree:-100001:1:2:${pid}:0`);
+    assert.match(h.calls.at(-1).text,/Олена/);assert.match(h.calls.at(-1).text,/⏳ Не підтвердив реєстрацію/);
+    assert.doesNotMatch(h.calls.at(-1).text,/tg:\/\/user|https:\/\/t.me\//);
+    await h.cb(2,'resident:add:-100001');assert.equal(h.form(2).step,'phone');
+    await h.msg(2,'067 123 45 67');assert.equal(h.form(2),undefined);
+    assert.equal(h.sqlite.prepare('SELECT name FROM profiles WHERE user_id=2').get().name,'Олена');
+    assert.equal(h.sqlite.prepare("SELECT count(*) n FROM memberships WHERE user_id=2 AND status='approved' AND role='owner'").get().n,2);
+    assert.equal(h.sqlite.prepare('SELECT count(*) n FROM imported_residents WHERE claimed_by IS NULL').get().n,1);
+    await h.cb(1,`directory:tree:-100001:1:2:${pid}:0`);assert.doesNotMatch(h.calls.at(-1).text,/Не підтвердив реєстрацію/);
+    await h.cb(3,'resident:add:-100002');await h.msg(3,'+380671234567');assert.match(h.calls.at(-1).text,/Цей номер уже використовується/);
+    assert.equal(h.sqlite.prepare('SELECT count(*) n FROM profiles WHERE user_id=3').get().n,0);
+  }finally{h.close();}
+});
+test('unknown imported phone continues ordinary registration without asking phone twice',async()=>{
+  const h=harness();try{
+    importContact(h,'25');await h.cb(3,'resident:add:-100001');const t=h.form(3).token;
+    await h.msg(3,'0677654321');assert.equal(h.form(3).step,'kind');
+    await h.cb(3,`reg:kind:${t}:apartment`);await h.msg(3,'26');await h.msg(3,'2');await h.msg(3,'Іван');
+    assert.equal(h.form(3).step,'role');await h.cb(3,`reg:role:${t}:owner`);await h.cb(3,`reg:submit:${t}`);
+    assert.equal(h.member(3,'26').status,'pending');
+    assert.equal(h.sqlite.prepare('SELECT count(*) n FROM imported_residents WHERE claimed_by IS NULL').get().n,1);
+  }finally{h.close();}
+});
+test('phone ownership is rechecked at submission and enforced by database',async()=>{
+  const h=harness();try{
+    await h.cb(2,'resident:add:-100001');const t=h.form(2).token;
+    await h.cb(2,`reg:kind:${t}:apartment`);await h.msg(2,'25');await h.msg(2,'2');await h.msg(2,'Олена');await h.msg(2,'0671234567');await h.cb(2,`reg:role:${t}:owner`);
+    h.sqlite.prepare("INSERT INTO profiles(user_id,name,phone) VALUES (3,'Іван','+380671234567')").run();
+    await h.cb(2,`reg:submit:${t}`);assert.match(h.calls.at(-1).text,/Цей номер уже використовується/);
+    assert.equal(h.sqlite.prepare('SELECT count(*) n FROM memberships').get().n,0);
+    assert.throws(()=>h.sqlite.prepare("INSERT INTO profiles(user_id,name,phone) VALUES (4,'Олег','+380671234567')").run(),/phone_already_linked/);
+  }finally{h.close();}
+});
 
 test('house structure, commercial identities, phones and presentation validation',()=>{
   for(const [n,e] of [['1',1],['84',1],['85',2],['133',2],['134',3],['187',3]])assert.equal(entranceForApartment(n),e);

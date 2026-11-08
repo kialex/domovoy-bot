@@ -6,15 +6,17 @@ import { escapeHtml } from './presentation.ts';
 import { apartmentNumber, positiveId, ukrainianPhone } from './validation.ts';
 import { commercialKey, entranceForApartment, membershipSelect, premiseLabel, roleLabel, validFloor } from './premises.ts';
 import type { Membership, Premise } from './premises.ts';
+import { claimImportedResidents, phoneInUse } from './imported-residents.ts';
 
 interface Form {
+  phone_first?: boolean;
   kind?: 'apartment' | 'commercial'; number?: string; business_name?: string; entrance?: number; floor?: number;
   ask_name?: boolean; ask_phone?: boolean; name?: string; phone?: string; role?: 'owner' | 'tenant' | 'family'; poll_id?: number;
 }
 interface Session { user_id: number; chat_id: number; token: string; step: string; data: string }
 const token = () => crypto.randomUUID().replace(/-/g, '').slice(0, 12);
-const sequence = (f: Form) => ['kind', ...(f.kind === 'commercial' ? ['business_name'] : ['number','floor']),
-  ...(f.ask_name !== false ? ['name'] : []), ...(f.ask_phone !== false ? ['phone'] : []), 'role','review'];
+const sequence = (f: Form) => [...(f.phone_first?['phone']:[]),'kind', ...(f.kind === 'commercial' ? ['business_name'] : ['number','floor']),
+  ...(f.ask_name !== false ? ['name'] : []), ...(!f.phone_first&&f.ask_phone !== false ? ['phone'] : []), 'role','review'];
 async function contactDefaults(env: Env, uid: number): Promise<Partial<Form>> {
   const profile = await env.HOME_DB.prepare('SELECT name,phone FROM profiles WHERE user_id=?').bind(uid).first<{name:string;phone:string}>();
   const name = profile?.name?.trim(); const phone = ukrainianPhone(profile?.phone || '');
@@ -124,9 +126,11 @@ export async function startRegistration(env: Env, uid: number, payload?: string,
       return;
     }
   }
-  const s: Session = { user_id: uid, chat_id: chatId, token: token(), step: 'kind', data: JSON.stringify({ poll_id: pollId, ...await contactDefaults(env,uid) }) };
-  await env.HOME_DB.prepare("INSERT INTO sessions(user_id,chat_id,token,step,data) VALUES (?,?,?,'kind',?) ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id,token=excluded.token,step='kind',data=excluded.data,updated_at=unixepoch()")
-    .bind(uid,chatId,s.token,s.data).run();
+  const defaults=await contactDefaults(env,uid);
+  const imported=defaults.ask_phone?await env.HOME_DB.prepare(`SELECT r.id FROM imported_residents r JOIN premises p ON p.id=r.premise_id WHERE p.chat_id=? AND r.claimed_by IS NULL LIMIT 1`).bind(chatId).first():null;
+  const s: Session = { user_id: uid, chat_id: chatId, token: token(), step: imported?'phone':'kind', data: JSON.stringify({ poll_id: pollId, ...defaults,phone_first:!!imported }) };
+  await env.HOME_DB.prepare("INSERT INTO sessions(user_id,chat_id,token,step,data) VALUES (?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id,token=excluded.token,step=excluded.step,data=excluded.data,updated_at=unixepoch()")
+    .bind(uid,chatId,s.token,s.step,s.data).run();
   return showForm(env,s);
 }
 export async function registrationMessage(env: Env, m: Message) {
@@ -148,6 +152,18 @@ export async function registrationMessage(env: Env, m: Message) {
   } else if (s.step === 'phone') {
     const phone = ukrainianPhone(value);
     if (!phone) return plainCard(env,s.user_id,'Перевірте номер. Наприклад: 067 123 45 67.');
+    if(await phoneInUse(env,phone,s.user_id))return plainCard(env,s.user_id,'Цей номер уже використовується. Зверніться до адміністратора.');
+    if(await claimImportedResidents(env,s.user_id,s.chat_id,phone,m.from?.username||'')){
+      await env.HOME_DB.prepare('DELETE FROM sessions WHERE user_id=? AND token=?').bind(s.user_id,s.token).run();
+      const {residentMenu}=await import('./resident-menu.ts');
+      const {adminMenu}=await import('./poll-wizard.ts');
+      if(String(s.user_id)===env.ADMIN_TELEGRAM_USER_ID)await adminMenu(env,'✅ Реєстрацію завершено. Ваші дані збережено.');
+      else await residentMenu(env,s.user_id,'✅ Реєстрацію завершено. Ваші дані збережено.');
+      await send(env,env.ADMIN_TELEGRAM_USER_ID,`✅ Підтвердив реєстрацію: ${phone}`);
+      await returnToRegistrationPoll(env,s.user_id,s.chat_id,f);
+      return;
+    }
+    if(await phoneInUse(env,phone,s.user_id))return plainCard(env,s.user_id,'Цей номер уже використовується. Зверніться до адміністратора.');
     f.phone = phone;
   } else if (s.step === 'name' || s.step === 'business_name') {
     const text = value.replace(/\s+/g,' ');
@@ -211,8 +227,9 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
   if (action === 'restart') {
     const nextToken = token();
     const defaults = await contactDefaults(env,s.user_id);
-    await env.HOME_DB.prepare("UPDATE sessions SET token=?,step='kind',data=?,updated_at=unixepoch() WHERE user_id=? AND token=?").bind(nextToken,JSON.stringify({poll_id:f.poll_id,...defaults}),s.user_id,s.token).run();
-    await answer(env,q.id,''); await showForm(env,{...s,token:nextToken,step:'kind',data:JSON.stringify({poll_id:f.poll_id,...defaults})}); return true;
+    const step=f.phone_first?'phone':'kind';const data=JSON.stringify({poll_id:f.poll_id,...defaults,phone_first:f.phone_first});
+    await env.HOME_DB.prepare('UPDATE sessions SET token=?,step=?,data=?,updated_at=unixepoch() WHERE user_id=? AND token=?').bind(nextToken,step,data,s.user_id,s.token).run();
+    await answer(env,q.id,''); await showForm(env,{...s,token:nextToken,step,data}); return true;
   }
   if (action === 'back') {
     const steps = sequence(f); const index = steps.indexOf(s.step);
@@ -220,7 +237,7 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
     else await registrationNotice(env,q,'Це перший крок.'); return true;
   }
   if (action === 'kind' && s.step === 'kind' && ['apartment','commercial'].includes(extra)) {
-    f = { kind: extra as Form['kind'], poll_id: f.poll_id, ...await contactDefaults(env,s.user_id) };
+    f = { kind: extra as Form['kind'], poll_id: f.poll_id, ...await contactDefaults(env,s.user_id),...(f.phone_first?{phone_first:true,phone:f.phone,ask_phone:false}:{}) };
     await answer(env,q.id,''); await save(env,s,f,f.kind === 'commercial' ? 'business_name' : 'number'); return true;
   }
   if (action === 'role' && s.step === 'role' && (f.kind==='apartment'?['owner','tenant','family']:['owner','tenant']).includes(extra)) {
@@ -230,6 +247,11 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
     : !!f.number && !!f.entrance && f.floor !== undefined && entranceForApartment(f.number) === f.entrance && validFloor('apartment',f.entrance,String(f.floor)) !== null;
   if (action !== 'submit' || s.step !== 'review' || !f.kind || !validProperty || !f.name || !ukrainianPhone(f.phone || '') || !f.role) {
     await registrationNotice(env,q,'Натисніть кнопку під останнім запитанням внизу чату.'); return true;
+  }
+  if(await phoneInUse(env,f.phone!,s.user_id)){
+    await answer(env,q.id,'');
+    await save(env,s,{...f,ask_phone:true},'phone');
+    await plainCard(env,s.user_id,'Цей номер уже використовується. Зверніться до адміністратора.');return true;
   }
   let inGroup:boolean;
   try{
@@ -263,6 +285,7 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
     if(verified){await answer(env,q.id,'');await plainCard(env,s.user_id,`Для цієї квартири вказано поверх ${p.floor}. Перевірте дані та заповніть заявку заново.`);return true;}
   }
   const status=inGroup?'approved':'pending';
+  try {
   await env.HOME_DB.batch([
     env.HOME_DB.prepare('INSERT INTO profiles(user_id,name,phone) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET name=excluded.name,phone=excluded.phone,updated_at=unixepoch()').bind(s.user_id,f.name,ukrainianPhone(f.phone!)!),
     env.HOME_DB.prepare(`INSERT INTO memberships(user_id,premise_id,role,status,application_token,details) VALUES (?,?,?,?,?,?)
@@ -272,6 +295,11 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
     ...(inGroup?[env.HOME_DB.prepare("INSERT INTO membership_audit(actor_id,membership_id,action) SELECT ?,id,'auto_approve_group_member' FROM memberships WHERE user_id=? AND premise_id=? AND application_token=?").bind(s.user_id,s.user_id,p.id,s.token)]:[]),
     env.HOME_DB.prepare('DELETE FROM sessions WHERE user_id=? AND token=?').bind(s.user_id,s.token),
   ]);
+  } catch(error) {
+    if(!await phoneInUse(env,f.phone!,s.user_id))throw error;
+    await answer(env,q.id,'');
+    await plainCard(env,s.user_id,'Цей номер уже використовується. Зверніться до адміністратора.');return true;
+  }
   await answer(env,q.id,'');
   if(inGroup){
     const group=await getGroup(env,s.chat_id);

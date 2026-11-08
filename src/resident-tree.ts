@@ -1,7 +1,7 @@
 import type { Button, Env } from './env.ts';
 import { getGroup, isConnected } from './groups.ts';
 import { escapeHtml, telegramProfileLink } from './presentation.ts';
-import { membershipSelect, roleLabel, roleIcon } from './premises.ts';
+import { roleLabel, roleIcon } from './premises.ts';
 import type { Membership, Premise } from './premises.ts';
 import { telegram } from './telegram.ts';
 
@@ -28,7 +28,7 @@ async function show(env:Env,text:string,buttons:Button[][],messageId?:number){
 export async function residentTree(env:Env,s:TreeState,messageId?:number){
   const group=await getGroup(env,s.chat);
   if(!isConnected(group))return show(env,'Будинок недоступний.',[],messageId);
-  const units=(await env.HOME_DB.prepare(`SELECT p.*,COUNT(m.id) member_count FROM premises p JOIN memberships m ON m.premise_id=p.id AND m.status IN ('approved','pending') WHERE p.chat_id=? GROUP BY p.id ORDER BY p.kind,p.entrance,p.floor,p.number_start,p.number,p.business_name`).bind(s.chat).all<TreeUnit>()).results;
+  const units=(await env.HOME_DB.prepare(`SELECT p.*,COUNT(m.id) member_count FROM premises p JOIN directory_members m ON m.premise_id=p.id WHERE p.chat_id=? GROUP BY p.id ORDER BY p.kind,p.entrance,p.floor,p.number_start,p.number,p.business_name`).bind(s.chat).all<TreeUnit>()).results;
   if(!units.length)return show(env,'Мешканців ще немає.',[],messageId);
   const branchKey=(p:Premise)=>p.kind==='commercial'?'c':p.entrance===null?UNKNOWN:String(p.entrance);
   const floorKey=(p:Premise)=>p.floor===null?UNKNOWN:String(p.floor);
@@ -43,7 +43,7 @@ export async function residentTree(env:Env,s:TreeState,messageId?:number){
   const unitPage=selected?Math.floor(levelUnits.indexOf(selected)/UNITS_PER_PAGE):Math.min(s.page,Math.max(0,Math.ceil(levelUnits.length/UNITS_PER_PAGE)-1));
   const visibleUnits=levelUnits.slice(unitPage*UNITS_PER_PAGE,(unitPage+1)*UNITS_PER_PAGE);
   const peoplePage=selected?Math.min(s.page,Math.max(0,Math.ceil(selected.member_count/PEOPLE_PER_PAGE)-1)):0;
-  const people=selected?(await env.HOME_DB.prepare(`${membershipSelect.replace('SELECT p.*','SELECT u.telegram_username,p.*')} WHERE p.id=? AND m.status IN ('approved','pending') ORDER BY u.name,m.id LIMIT ? OFFSET ?`).bind(selected.id,PEOPLE_PER_PAGE+1,peoplePage*PEOPLE_PER_PAGE).all<Membership>()).results:[];
+  const people=selected?(await env.HOME_DB.prepare(`SELECT m.* FROM directory_members m WHERE m.premise_id=? ORDER BY m.name,m.id LIMIT ? OFFSET ?`).bind(selected.id,PEOPLE_PER_PAGE+1,peoplePage*PEOPLE_PER_PAGE).all<Membership>()).results:[];
   const base={...s,unit:0,page:0};
   const root={...base,entrance:ROOT,floor:ROOT};
   const branchAction=(text:string,state:TreeState)=>action(text,treeData(state));
@@ -53,10 +53,11 @@ export async function residentTree(env:Env,s:TreeState,messageId?:number){
     people.slice(0,PEOPLE_PER_PAGE).forEach((m,i)=>{
       const last=i===Math.min(people.length,PEOPLE_PER_PAGE)-1;
       const details=prefix+(last?'   ':'│  ');
-      line(prefix+(last?'└─ ':'├─ '),`👤 ${telegramProfileLink(m.user_id,clean(m.name,100),m.telegram_username)}`);
+      line(prefix+(last?'└─ ':'├─ '),`👤 ${m.user_id?telegramProfileLink(m.user_id,clean(m.name,100),m.telegram_username):escapeHtml(clean(m.name,100))}`);
       line(details,`${roleIcon(m.role)} ${roleLabel(m.role)}${m.status==='pending'?' · ⏳ Заявка':''}`);
       if(m.telegram_username)line(details,telegramProfileLink(m.user_id,`@${m.telegram_username}`,m.telegram_username));
       line(details,`📞 ${escapeHtml(m.phone)}`);
+      if(m.status==='unconfirmed')line(details,'⏳ Не підтвердив реєстрацію');
     });
     const nav:string[]=[];
     if(peoplePage>0)nav.push(branchAction('← Мешканці',{...s,page:peoplePage-1}));

@@ -1402,3 +1402,18 @@ test('resident tree uses native link-style callbacks in the text and toggles bra
   await h.cb(1,'directory:tree:-100001:1:2:0:0',target);assert.doesNotMatch(h.calls.at(-1).text,/Person 2|380/);
  }finally{h.close();}
 });
+
+test('monobank deposit comments appear only when present and are escaped without exposing sender details',async()=>{
+ const {scheduledMono}=await import('../src/monobank.ts');const h=harness();try{
+  const f=await saveMono(h,await monoSetup(h));
+  h.monoOps=[
+   {id:'with-comment',time:f.started_at,amount:10000,balance:110000,hold:false,comment:'  Кв. 95\n <дякую> & сусіди  ',description:'Від: Private Sender',counterName:'Private Sender'},
+   {id:'without-comment',time:f.started_at+1,amount:10000,balance:120000,hold:false},
+   {id:'empty-comment',time:f.started_at+2,amount:10000,balance:130000,hold:false,comment:' \n '},
+  ];h.calls.length=0;await scheduledMono(h.env);
+  const sent=h.calls.filter(c=>isSend(c.method)&&c.chat_id===-100001);assert.equal(sent.length,3);
+  assert.match(sent[0].text,/💬 Кв\. 95 &lt;дякую&gt; &amp; сусіди\nЗібрано/);
+  assert.doesNotMatch(sent[1].text,/💬/);assert.doesNotMatch(sent[2].text,/💬/);
+  assert.ok(sent.every(c=>!c.text.includes('Private Sender')));
+ }finally{h.close();}
+});

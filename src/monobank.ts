@@ -11,7 +11,7 @@ interface Jar {id:string;title:string;balance:number;goal?:number;currencyCode:n
 interface Setup {nonce:string;step:string;connection_id:string|null;jar_id:string|null;chat_id:number|null;deposits:number;daily:number;goal_notice:number;expires_at:number}
 interface Connection {id:string;token_cipher:string;jars:string;last_request_at:number}
 interface Fund {id:string;connection_id:string;jar_id:string;chat_id:number;group_version:number;title:string;balance:number;goal:number;active:number;deposits:number;daily:number;goal_notice:number;started_at:number;checked_at:number;goal_sent:number;error:string}
-interface Operation {id:string;time:number;amount:number;balance:number;hold:boolean}
+interface Operation {id:string;time:number;amount:number;balance:number;hold:boolean;comment?:string}
 async function key(env:Env){
   if(!env.MONOBANK_ENCRYPTION_KEY)throw new Error('Monobank key missing');
   return crypto.subtle.importKey('raw',await crypto.subtle.digest('SHA-256',new TextEncoder().encode(env.MONOBANK_ENCRYPTION_KEY)),{name:'AES-GCM'},false,['encrypt','decrypt']);
@@ -97,8 +97,8 @@ async function chosenJar(env:Env,s:Setup){
   const c=await env.HOME_DB.prepare('SELECT * FROM mono_connections WHERE id=?').bind(s.connection_id).first<Connection>();
   return c?(JSON.parse(c.jars) as Jar[]).find(j=>j.id===s.jar_id):undefined;
 }
-function balanceLine(title:string,balance:number,goal:number){return `${escapeHtml(title)}\nЗібрано <b>${money(balance)}</b>${goal?` із ${money(goal)}`:''}`;}
-function depositText(title:string,amount:number,balance:number,goal:number){return `💸 <b>+${money(amount)} у банку</b>\n${balanceLine(title,balance,goal)}\nДякуємо за внесок!`;}
+function balanceLine(title:string,balance:number,goal:number,comment?:string){return `${escapeHtml(title)}${comment?`\n💬 ${escapeHtml(comment)}`:''}\nЗібрано <b>${money(balance)}</b>${goal?` із ${money(goal)}`:''}`;}
+function depositText(title:string,amount:number,balance:number,goal:number,comment?:unknown){const note=typeof comment==='string'?comment.replace(/\s+/g,' ').trim().slice(0,300):'';return `💸 <b>+${money(amount)} у банку</b>\n${balanceLine(title,balance,goal,note)}\nДякуємо за внесок!`;}
 function dailyText(title:string,total:number,balance:number,goal:number){return `💰 <b>Підсумки збору за день</b>\n${escapeHtml(title)}\nЗа сьогодні <b>+${money(total)}</b>\nЗібрано <b>${money(balance)}</b>${goal?` із ${money(goal)}`:''}`;}
 function goalText(title:string,balance:number,goal:number){return `🎉 <b>Ціль збору досягнуто!</b>\n${balanceLine(title,balance,goal)}\nДякуємо всім за підтримку!`;}
 export async function monoCallback(env:Env,q:Callback){
@@ -180,7 +180,7 @@ export async function scheduledMono(env:Env){
         if(o.hold||o.time<f.started_at)continue;
         // Persist transaction and its notification together, so retries cannot lose an event.
         await env.HOME_DB.batch([
-          env.HOME_DB.prepare(`INSERT INTO mono_outbox(fund_id,event_key,text) SELECT ?,?,? WHERE ?>0 AND ?=1 AND NOT EXISTS (SELECT 1 FROM mono_operations WHERE fund_id=? AND operation_id=?) ON CONFLICT(fund_id,event_key) DO NOTHING`).bind(f.id,'op:'+o.id,depositText(f.title,o.amount,o.balance,f.goal),o.amount,f.deposits,f.id,o.id),
+          env.HOME_DB.prepare(`INSERT INTO mono_outbox(fund_id,event_key,text) SELECT ?,?,? WHERE ?>0 AND ?=1 AND NOT EXISTS (SELECT 1 FROM mono_operations WHERE fund_id=? AND operation_id=?) ON CONFLICT(fund_id,event_key) DO NOTHING`).bind(f.id,'op:'+o.id,depositText(f.title,o.amount,o.balance,f.goal,o.comment),o.amount,f.deposits,f.id,o.id),
           env.HOME_DB.prepare('INSERT INTO mono_operations VALUES (?,?,?,?) ON CONFLICT DO NOTHING').bind(f.id,o.id,o.time,o.amount),
         ]);
       }

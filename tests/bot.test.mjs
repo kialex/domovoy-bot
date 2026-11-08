@@ -7,6 +7,8 @@ import { apartmentNumber, parsePoll, ukrainianPhone } from '../src/validation.ts
 import { entranceForApartment, commercialKey, validFloor } from '../src/premises.ts';
 import { pollCard } from '../src/presentation.ts';
 
+const isSend=method=>['sendMessage','sendRichMessage'].includes(method);
+
 function database(until = '9999') {
   const sqlite = new DatabaseSync(':memory:');
   for (const file of readdirSync(new URL('../migrations/',import.meta.url)).filter(f=>f.endsWith('.sql')&&f<until).sort()) sqlite.exec(readFileSync(new URL(`../migrations/${file}`,import.meta.url),'utf8'));
@@ -43,9 +45,9 @@ function harness(groups=1) {
     nextId(){return ++update;},close(){globalThis.fetch=oldFetch;sqlite.close();},
   };
   globalThis.fetch=async(url,init)=>{
-    const method=url.split('/').at(-1);const body=JSON.parse(init.body);calls.push({method,...body});
+    const method=url.split('/').at(-1);const body=JSON.parse(init.body);if(body.rich_message)body.text=body.rich_message.html;calls.push({method,...body});
     if(h.apiOverride){const response=await h.apiOverride(method,body);if(response)return response;}
-    if(h.fail===method)return Response.json({ok:false},{status:503});
+    if(h.fail===method||(h.fail==='sendMessage'&&isSend(method)))return Response.json({ok:false},{status:503});
     if(method==='getChatMember')return Response.json({ok:true,result:{status:'left'}});
     return Response.json({ok:true,result:{username:'HomeTestBot',message_id:++message}});
   };
@@ -111,7 +113,7 @@ test('private registration: preview, invalid floor/phone, back, restart, consent
     await h.msg(2,'+48123456789');assert.equal(h.form(2).step,'phone');await h.msg(2,'067 123 45 67');
     await h.cb(2,`reg:role:${s.token}:tenant`);assert.equal(h.form(2).step,'review');
     assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM memberships').get().n,0);
-    assert.equal(h.calls.some(c=>c.method==='sendMessage'&&String(c.chat_id)==='1'),false,'no private data reaches admin before Submit');
+    assert.equal(h.calls.some(c=>isSend(c.method)&&String(c.chat_id)==='1'),false,'no private data reaches admin before Submit');
     await h.cb(3,`reg:submit:${s.token}`);assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM memberships').get().n,0);
     await h.cb(2,`reg:back:${s.token}`);assert.equal(h.form(2).step,'role');await h.cb(2,`reg:role:${s.token}:owner`);
     await h.cb(2,`reg:restart:${s.token}`);assert.notEqual(h.form(2).token,s.token);
@@ -140,17 +142,17 @@ test('commercial registration uses name only and shares canonical business ident
 test('one premise vote stays in group, live counts update, other resident cannot overwrite, closing freezes results',async()=>{
   const h=harness();try{
     await register(h,2);await register(h,3,{role:'tenant'});const p=await poll(h);
-    const published=h.calls.find(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id);
-    assert.equal(published.reply_markup.inline_keyboard.length,2);assert.ok(published.reply_markup.inline_keyboard.flat().every(b=>b.callback_data&&!b.url));
+    const published=h.calls.find(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id);
+    assert.equal(published.method,'sendRichMessage');assert.equal((published.rich_message.html.match(/type="callback_data"/g)||[]).length,2);assert.ok(published.rich_message.html.includes(`data="vote:${p.id}:0"`));assert.ok(!published.rich_message.html.includes('type="url"'));
     await cast(h,9,p,0);assert.equal(currentVotes(h).length,0);assert.equal(h.calls.at(-1).url,`https://t.me/HomeTestBot?start=poll_${p.id}`);
     await h.cb(2,`vote:${p.id}:0`,{...groupMessage(p),message_id:99999});assert.equal(currentVotes(h).length,0);
     await cast(h,2,p,0);assert.equal(currentVotes(h).length,1);
-    const live=h.calls.filter(c=>c.method==='editMessageText').at(-1);assert.match(live.text,/100%/);assert.equal(live.reply_markup.inline_keyboard[0][0].text,'Yes · 1');
+    const live=h.calls.filter(c=>c.method==='editMessageText').at(-1);assert.match(live.text,/100%/);assert.match(live.rich_message.html,/Проголосувати · 1 голос/);assert.deepEqual(live.reply_markup.inline_keyboard,[]);
     assert.ok(!live.text.includes('Person'));await cast(h,3,p,1);assert.equal(currentVotes(h)[0].option_index,0);
     assert.match(h.calls.at(-1).text,/Person 2/);assert.match(h.calls.at(-1).text,/Власник/);assert.equal(h.calls.at(-1).method,'answerCallbackQuery');
     await cast(h,2,p,1);assert.equal(currentVotes(h)[0].option_index,1,'only the original author may change their vote');
     await closePoll(h,p.id);await cast(h,2,p,0);assert.equal(currentVotes(h)[0].option_index,1);
-    const outcome=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).at(-1);assert.match(outcome.text,/Підсумки голосування/);assert.equal(outcome.reply_markup,undefined);
+    const outcome=h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).at(-1);assert.match(outcome.text,/Підсумки голосування/);assert.equal(outcome.reply_markup,undefined);
     assert.ok(h.calls.some(c=>c.method==='deleteMessage'&&c.message_id===p.message_id));
   }finally{h.close();}
 });
@@ -352,7 +354,7 @@ test('wizard interval selection is mandatory, validated and saved with scheduled
     await h.cb(1,`draft:intervalmenu:${d.token}`);await h.cb(1,`draft:interval:${d.token}:21600`);
     await h.cb(1,`draft:publish:${d.token}`);const p=h.sqlite.prepare('SELECT * FROM polls').get();
     assert.equal(p.repost_interval,21600);assert.equal(p.next_repost_at,p.published_at+21600);
-    const controls=h.calls.find(c=>c.method==='sendMessage'&&c.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data===`pollctl:raise:${p.id}`));assert.ok(controls);
+    const controls=h.calls.find(c=>isSend(c.method)&&c.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data===`pollctl:raise:${p.id}`));assert.ok(controls);
   }finally{h.close();}
 });
 
@@ -365,10 +367,10 @@ test('manual raise keeps all votes and private choices, publishes first, deletes
     const start=h.calls.length;assert.equal(await raisePoll(h.env,p.id,'manual-test'),'raised');
     const fresh=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(p.id);assert.notEqual(fresh.message_id,p.message_id);
     assert.deepEqual(currentVotes(h),before);assert.equal(fresh.next_repost_at,fresh.published_at+3600);
-    const actions=h.calls.slice(start);const sent=actions.findIndex(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id);const deleted=actions.findIndex(c=>c.method==='deleteMessage');
+    const actions=h.calls.slice(start);const sent=actions.findIndex(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id);const deleted=actions.findIndex(c=>c.method==='deleteMessage');
     assert.ok(sent>=0&&deleted>sent);assert.equal(actions[deleted].message_id,p.message_id);assert.ok(actions.every(c=>c.method!=='deleteMessage'||c.message_id!==fresh.message_id));
-    const sendCount=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length;
-    assert.equal(await raisePoll(h.env,p.id,'manual-test'),'already');assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length,sendCount);
+    const sendCount=h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).length;
+    assert.equal(await raisePoll(h.env,p.id,'manual-test'),'already');assert.equal(h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).length,sendCount);
     const second=h.member(2,'26');await h.cb(2,`cast:${intent.token}:${second.premise_id}`);assert.equal(currentVotes(h).length,2,'private intent remains valid after repost');
     await h.cb(2,`pollctl:raise:${p.id}`);assert.equal(h.sqlite.prepare('SELECT message_id FROM polls WHERE id=?').get(p.id).message_id,fresh.message_id,'resident cannot raise');
     await h.msg(1,'📋 Мої голосування');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`pollctl:show:${p.id}`));
@@ -379,8 +381,8 @@ test('scheduled raises run only for due open connected polls; manual-only and cl
   const {scheduledReposts,raisePoll}=await import('../src/poll-reposting.ts');
   const h=harness();try{
     const manual=await poll(h);const timed=await poll(h,-100001,10800);
-    const before=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===timed.chat_id).length;
-    await scheduledReposts(h.env);assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===timed.chat_id).length,before);
+    const before=h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===timed.chat_id).length;
+    await scheduledReposts(h.env);assert.equal(h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===timed.chat_id).length,before);
     h.sqlite.prepare('UPDATE polls SET next_repost_at=unixepoch()-1 WHERE id=?').run(timed.id);
     await scheduledReposts(h.env);const current=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(timed.id);assert.notEqual(current.message_id,timed.message_id);
     assert.equal(h.sqlite.prepare('SELECT message_id FROM polls WHERE id=?').get(manual.id).message_id,manual.message_id);
@@ -421,7 +423,7 @@ test('closing while a replacement is being sent cannot reopen the poll or leave 
   const {raisePoll}=await import('../src/poll-reposting.ts');const h=harness();try{
     const p=await poll(h,-100001,3600);const original=p.message_id;
     h.apiOverride=async(method,body)=>{
-      if(method==='sendMessage'&&Number(body.chat_id)===p.chat_id){h.sqlite.prepare("UPDATE polls SET status='closed',next_repost_at=NULL WHERE id=?").run(p.id);h.apiOverride=null;}
+      if(isSend(method)&&Number(body.chat_id)===p.chat_id){h.sqlite.prepare("UPDATE polls SET status='closed',next_repost_at=NULL WHERE id=?").run(p.id);h.apiOverride=null;}
       return null;
     };
     assert.equal(await raisePoll(h.env,p.id,'close-race'),'unavailable');
@@ -434,9 +436,9 @@ test('repost retry after a later raise does not publish the earlier request agai
   const {raisePoll}=await import('../src/poll-reposting.ts');const h=harness();try{
     const p=await poll(h);assert.equal(await raisePoll(h.env,p.id,'first-request'),'raised');assert.equal(await raisePoll(h.env,p.id,'second-request'),'raised');
     const latest=h.sqlite.prepare('SELECT message_id FROM polls WHERE id=?').get(p.id).message_id;
-    const before=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length;
+    const before=h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).length;
     assert.equal(await raisePoll(h.env,p.id,'first-request'),'already');assert.equal(h.sqlite.prepare('SELECT message_id FROM polls WHERE id=?').get(p.id).message_id,latest);
-    assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length,before);
+    assert.equal(h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).length,before);
   }finally{h.close();}
 });
 
@@ -444,10 +446,10 @@ test('cleanup retry removes an old copy after a transient deletion error without
   const {raisePoll,cleanupPollCopies}=await import('../src/poll-reposting.ts');const h=harness();try{
     const p=await poll(h);h.fail='deleteMessage';assert.equal(await raisePoll(h.env,p.id,'transient'),'raised');
     assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM poll_message_cleanup').get().n,1);
-    const before=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length;
+    const before=h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).length;
     h.fail=null;await cleanupPollCopies(h.env);
     assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM poll_message_cleanup').get().n,0);
-    assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length,before);
+    assert.equal(h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).length,before);
   }finally{h.close();}
 });
 
@@ -512,11 +514,11 @@ test('expired votes are rejected immediately; scheduler posts one compact outcom
     await cast(h,3,p,1);assert.equal(currentVotes(h).length,1,'deadline blocks voting before scheduled callback arrives');
     const start=h.calls.length;await scheduledReposts(h.env);
     const done=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(p.id);assert.equal(done.status,'closed');assert.equal(done.next_repost_at,null);assert.ok(done.result_message_id);assert.equal(done.message_id,done.result_message_id);
-    const actions=h.calls.slice(start);const outcomeIndex=actions.findIndex(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id);const deleteIndex=actions.findIndex(c=>c.method==='deleteMessage'&&c.message_id===p.message_id);
+    const actions=h.calls.slice(start);const outcomeIndex=actions.findIndex(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id);const deleteIndex=actions.findIndex(c=>c.method==='deleteMessage'&&c.message_id===p.message_id);
     assert.ok(outcomeIndex>=0&&deleteIndex>outcomeIndex);const outcome=actions[outcomeIndex];assert.equal(outcome.reply_markup,undefined);
-    assert.ok(outcome.text.includes(`<b>1. Yes</b>\n<code>▰▰▰▰▰▰▰▰▰▰</code>  1 голос · <b>100%</b>`));assert.match(outcome.text,/Найбільше голосів/);assert.match(outcome.text,/Київ/);assert.ok(!outcome.text.includes('Person 2'));
-    const before=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length;
-    await scheduledReposts(h.env);await closePoll(h,p.id);assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length,before);
+    assert.match(outcome.rich_message.html,/<td[^>]*>Yes<\/td>/);assert.match(outcome.rich_message.html,/<b>100%<\/b>/);assert.match(outcome.rich_message.html,/<p>1 голос<\/p>/);assert.ok(!outcome.rich_message.html.includes('<tg-button'));assert.match(outcome.text,/Найбільше голосів/);assert.match(outcome.text,/Київ/);assert.ok(!outcome.text.includes('Person 2'));
+    const before=h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).length;
+    await scheduledReposts(h.env);await closePoll(h,p.id);assert.equal(h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).length,before);
   }finally{h.close();}
 });
 
@@ -582,9 +584,9 @@ test('closing requires a fresh private confirmation for the chosen poll',async()
   h.sqlite.prepare('UPDATE poll_close_confirmations SET expires_at=0').run();
   await h.cb(1,`pollctl:close:${p.id}:${expired}`);assert.equal(status(),'open');
   await closePoll(h,p.id);assert.equal(status(),'closed');
-  const before=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length;
+  const before=h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).length;
   await h.cb(1,`pollctl:close:${p.id}:${old}`);
-  assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).length,before);
+  assert.equal(h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).length,before);
  }finally{h.close();}
 });
 
@@ -602,7 +604,7 @@ test('admin report groups sorted apartments by entrance and answer, includes com
  const h=harness();try{
   await register(h,2,{number:'84a',floor:'14'});await register(h,3,{number:'95',floor:'3'});await register(h,4,{kind:'commercial',business:'Coffee <Bar>'});
   const p=await poll(h);await cast(h,2,p,0);await cast(h,3,p,1);await cast(h,4,p,0);
-  const before=h.calls.length;await h.cb(2,`pollctl:results:${p.id}`);assert.equal(h.calls.slice(before).filter(c=>c.method==='sendMessage').length,0);
+  const before=h.calls.length;await h.cb(2,`pollctl:results:${p.id}`);assert.equal(h.calls.slice(before).filter(c=>isSend(c.method)).length,0);
   await h.cb(1,`pollctl:results:${p.id}`);let text=h.calls.at(-1).text;
   assert.match(text,/Під’їзд 1/);assert.match(text,/Yes: 84А/);assert.match(text,/Під’їзд 2/);assert.match(text,/No: 95/);assert.match(text,/Комерція/);assert.match(text,/Coffee &lt;Bar&gt;/);assert.ok(!text.includes('+380'));assert.ok(!text.includes('№'));
   await closePoll(h,p.id);await h.cb(1,'pollctl:list:0:closed');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`pollctl:show:${p.id}`));
@@ -676,8 +678,8 @@ test('registration asks each field briefly without repeated headers or duplicate
   await h.msg(2,'/start');const token=h.form(2).token;
   assert.equal(h.calls.at(-1).text.trim(),'Що реєструємо?');
   await h.cb(2,`reg:kind:${token}:apartment`);assert.equal(h.calls.at(-1).text.trim(),'Напишіть номер квартири.');
-  await h.msg(2,'25');const before=h.calls.filter(c=>c.method==='sendMessage').length;
-  await h.msg(2,'0');assert.equal(h.calls.filter(c=>c.method==='sendMessage').length,before+1);assert.equal(h.form(2).step,'floor');
+  await h.msg(2,'25');const before=h.calls.filter(c=>isSend(c.method)).length;
+  await h.msg(2,'0');assert.equal(h.calls.filter(c=>isSend(c.method)).length,before+1);assert.equal(h.form(2).step,'floor');
   await h.msg(2,'2');assert.equal(h.calls.at(-1).text.trim(),'Напишіть ім’я та прізвище.');
   await h.msg(2,'Olena Koval');assert.equal(h.calls.at(-1).text.trim(),'Напишіть номер телефону.');
   await h.msg(2,'0671234567');assert.equal(h.calls.at(-1).text.trim(),'Оберіть вашу роль.');
@@ -702,8 +704,8 @@ test('directory protects foreign contacts, isolates houses, paginates and reject
   const a=await register(h,2);const b=await register(h,3,{number:'95',floor:'3',chat:-100002});
   await h.msg(1,'👥 Мешканці будинку');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='directory:house:-100002:0'));
   await h.cb(1,'directory:house:-100001:0');let buttons=h.calls.at(-1).reply_markup.inline_keyboard.flat();assert.ok(buttons.some(x=>x.callback_data===`directory:members:${a.premise_id}:0`));assert.ok(!buttons.some(x=>x.callback_data===`directory:members:${b.premise_id}:0`));
-  for(const uid of [2,3]){const before=h.calls.length;await h.cb(uid,`directory:person:${b.id}`);assert.equal(h.calls.slice(before).filter(c=>c.method==='sendMessage').length,0);}
-  const before=h.calls.length;await h.cb(1,`directory:person:${b.id}`,{message_id:1,chat:{id:-100002,type:'supergroup'}});assert.equal(h.calls.slice(before).filter(c=>c.method==='sendMessage').length,0);
+  for(const uid of [2,3]){const before=h.calls.length;await h.cb(uid,`directory:person:${b.id}`);assert.equal(h.calls.slice(before).filter(c=>isSend(c.method)).length,0);}
+  const before=h.calls.length;await h.cb(1,`directory:person:${b.id}`,{message_id:1,chat:{id:-100002,type:'supergroup'}});assert.equal(h.calls.slice(before).filter(c=>isSend(c.method)).length,0);
   for(let i=30;i<39;i++)await register(h,10+i,{number:String(i)});
   await h.cb(1,'directory:house:-100001:0');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(x=>x.callback_data==='directory:house:-100001:1'));
   await h.cb(1,'directory:house:-100001:1');assert.match(h.calls.at(-1).text,/Оберіть квартиру/);
@@ -756,7 +758,7 @@ test('failed join approval persists for retry, deduplicates requests and ignores
 
 test('failed join welcome can resume with Start in the right house and disconnected requests cannot approve',async()=>{
  const h=harness(2);try{
-  let failed=false;h.apiOverride=(method,body)=>{if(method==='sendMessage'&&Number(body.chat_id)===2&&!failed){failed=true;return Response.json({ok:false},{status:403});}};
+  let failed=false;h.apiOverride=(method,body)=>{if(isSend(method)&&Number(body.chat_id)===2&&!failed){failed=true;return Response.json({ok:false},{status:403});}};
   await requestJoin(h,2,-100002);assert.equal(h.sqlite.prepare('SELECT status FROM join_requests').get().status,'pending');
   await h.msg(2,'/start');assert.equal(h.form(2).chat_id,-100002);
   const j=h.sqlite.prepare('SELECT * FROM join_requests').get();h.sqlite.prepare("UPDATE groups SET status='disconnected' WHERE chat_id=-100002").run();
@@ -777,7 +779,7 @@ test('Start resumes join registration for an existing profile without repeating 
 test('successful entry sends one short private welcome with the resident keyboard, including returns',async()=>{
  const {retryJoins}=await import('../src/join-requests.ts');const h=harness();try{
   await register(h,2);const start=h.calls.length;await requestJoin(h,2);
-  const welcomes=()=>h.calls.slice(start).filter(c=>c.method==='sendMessage'&&c.text?.startsWith('🏡 Вітаємо у'));
+  const welcomes=()=>h.calls.slice(start).filter(c=>isSend(c.method)&&c.text?.startsWith('🏡 Вітаємо у'));
   assert.equal(welcomes().length,1);const welcome=welcomes()[0];assert.equal(welcome.chat_id,2);assert.match(welcome.text,/голосувати/);assert.ok(welcome.reply_markup.keyboard.flat().some(b=>b.text==='👤 Мої дані'));assert.equal(welcome.reply_markup.inline_keyboard,undefined);
   await retryJoins(h.env);assert.equal(welcomes().length,1);
   await requestJoin(h,2);assert.equal(welcomes().length,2);assert.equal(h.form(2),undefined);
@@ -787,7 +789,7 @@ test('successful entry sends one short private welcome with the resident keyboar
 test('welcome failure does not undo entry and retries without approving the request again',async()=>{
  const {retryJoins}=await import('../src/join-requests.ts');const h=harness();try{
   await register(h,2);let fail=true;
-  h.apiOverride=(method,body)=>method==='sendMessage'&&body.text?.startsWith('🏡 Вітаємо у')&&fail?Response.json({ok:false},{status:403}):undefined;
+  h.apiOverride=(method,body)=>isSend(method)&&body.text?.startsWith('🏡 Вітаємо у')&&fail?Response.json({ok:false},{status:403}):undefined;
   await requestJoin(h,2);let j=h.sqlite.prepare('SELECT * FROM join_requests').get();assert.equal(j.status,'approved');assert.equal(j.welcomed,0);
   fail=false;await retryJoins(h.env);j=h.sqlite.prepare('SELECT * FROM join_requests').get();assert.equal(j.welcomed,1);assert.equal(h.calls.filter(c=>c.method==='approveChatJoinRequest').length,1);
  }finally{h.close();}
@@ -810,7 +812,7 @@ test('existing Telegram members register as owners or tenants without admin appl
   h.apiOverride=(method,body)=>method==='getChatMember'?Response.json({ok:true,result:{status:'member'}}):undefined;
   const before=h.calls.length;const owner=await register(h,2);const tenant=await register(h,3,{number:'26',role:'tenant'});
   assert.equal(owner.status,'approved');assert.equal(tenant.status,'approved');
-  assert.ok(h.calls.slice(before).filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===1).every(c=>c.text.startsWith('✅ Зареєстровано:')&&!c.reply_markup));
+  assert.ok(h.calls.slice(before).filter(c=>isSend(c.method)&&Number(c.chat_id)===1).every(c=>c.text.startsWith('✅ Зареєстровано:')&&!c.reply_markup));
   assert.equal(h.sqlite.prepare("SELECT COUNT(*) AS n FROM membership_audit WHERE action='auto_approve_group_member'").get().n,2);
   const p=await poll(h);await cast(h,2,p,0);assert.equal(currentVotes(h).length,1);
  }finally{h.close();}
@@ -874,20 +876,20 @@ test('family role migration preserves existing memberships, audit and votes',()=
 test('group approval posts one welcome with a house-specific private registration button',async()=>{
  const h=harness(2);try{
   h.sqlite.prepare("UPDATE groups SET status='pending' WHERE chat_id=-100001").run();
-  await h.cb(2,'group:approve:-100001:1');assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===-100001).length,0);
+  await h.cb(2,'group:approve:-100001:1');assert.equal(h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===-100001).length,0);
   await h.cb(1,'group:approve:-100001:1');
-  const greetings=()=>h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===-100001);
+  const greetings=()=>h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===-100001);
   assert.equal(greetings().length,1);const message=greetings()[0];assert.match(message.text,/Вітаємо, сусіди/);assert.match(message.text,/один голос/);assert.match(message.text,/Телефон бачить лише адміністратор/);
   assert.match(message.reply_markup.inline_keyboard[0][0].url,/start=group_100001$/);
   await h.cb(1,'group:approve:-100001:1');assert.equal(greetings().length,1);
-  assert.equal(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===-100002).length,0);
+  assert.equal(h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===-100002).length,0);
  }finally{h.close();}
 });
 
 test('group welcome retries independently of connection and stops after successful delivery',async()=>{
  const {retryGroupWelcomes}=await import('../src/group-welcome.ts');const h=harness();try{
   h.sqlite.prepare("UPDATE groups SET status='pending' WHERE chat_id=-100001").run();let fail=true;
-  h.apiOverride=(method,body)=>method==='sendMessage'&&Number(body.chat_id)===-100001&&fail?Response.json({ok:false},{status:403}):undefined;
+  h.apiOverride=(method,body)=>isSend(method)&&Number(body.chat_id)===-100001&&fail?Response.json({ok:false},{status:403}):undefined;
   await h.cb(1,'group:approve:-100001:1');assert.equal(h.sqlite.prepare('SELECT status FROM groups').get().status,'approved');assert.equal(h.sqlite.prepare('SELECT message_id FROM group_welcomes').get().message_id,null);
   fail=false;await retryGroupWelcomes(h.env);assert.ok(h.sqlite.prepare('SELECT message_id FROM group_welcomes').get().message_id);
   const before=h.calls.length;await retryGroupWelcomes(h.env);assert.equal(h.calls.length,before);
@@ -923,7 +925,7 @@ test('one available premise casts directly in the group without a private select
  const h=harness();try{
   await register(h,2);const p=await poll(h);const before=h.calls.length;await cast(h,2,p,0);
   assert.equal(currentVotes(h).length,1);assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM vote_intents').get().n,0);
-  assert.equal(h.calls.slice(before).filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===2).length,0);
+  assert.equal(h.calls.slice(before).filter(c=>isSend(c.method)&&Number(c.chat_id)===2).length,0);
  }finally{h.close();}
 });
 
@@ -935,7 +937,7 @@ test('registration from a group poll auto-approves existing participants and ret
   await h.cb(2,`reg:kind:${token}:apartment`);await h.msg(2,'25');await h.msg(2,'2');await h.msg(2,'Olena Koval');await h.msg(2,'0671234567');await h.cb(2,`reg:role:${token}:owner`);
   h.sqlite.prepare('UPDATE polls SET message_id=88888 WHERE id=?').run(p.id);
   const before=h.calls.length;await h.cb(2,`reg:submit:${token}`);
-  assert.equal(h.member(2,'25').status,'approved');assert.ok(h.calls.slice(before).filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===1).every(c=>c.text.startsWith('✅ Зареєстровано:')&&!c.reply_markup));
+  assert.equal(h.member(2,'25').status,'approved');assert.ok(h.calls.slice(before).filter(c=>isSend(c.method)&&Number(c.chat_id)===1).every(c=>c.text.startsWith('✅ Зареєстровано:')&&!c.reply_markup));
   const last=h.calls.at(-1);assert.equal(last.text,'Тепер можна проголосувати.');assert.equal(last.reply_markup.inline_keyboard[0][0].url,'https://t.me/c/001/88888');
   assert.equal(currentVotes(h).length,0,'registration does not cast a vote without choosing an answer');
   const updated=h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(p.id);await cast(h,2,updated,0);assert.equal(currentVotes(h).length,1);
@@ -971,10 +973,10 @@ test('poll wizard validates a short title and separate description; cards retain
   await h.msg(1,'Yes');await h.msg(1,'No');await h.cb(1,`draft:preview:${d.token}`);await h.cb(1,`draft:duration:${d.token}:0`);await h.cb(1,`draft:interval:${d.token}:0`);
   assert.match(h.calls.at(-1).text,/Вартість: 500 грн/);await h.cb(1,`draft:publish:${d.token}`);
   const p=h.sqlite.prepare('SELECT * FROM polls').get();assert.equal(p.question,title);assert.match(p.description,/Ремонт <ліфта>/);
-  const card=h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).at(-1);assert.match(card.text,/Ремонт &lt;ліфта&gt; &amp; входу/);
+  const card=h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).at(-1);assert.match(card.text,/Ремонт &lt;ліфта&gt; &amp; входу/);
   await register(h,2);await cast(h,2,p,0);assert.match(h.calls.filter(c=>c.method==='editMessageText').at(-1).text,/Вартість: 500 грн/);
-  await h.cb(1,`pollctl:raise:${p.id}`);assert.match(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).at(-1).text,/Вартість: 500 грн/);
-  await closePoll(h,p.id);assert.match(h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===p.chat_id).at(-1).text,/Вартість: 500 грн/);
+  await h.cb(1,`pollctl:raise:${p.id}`);assert.match(h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).at(-1).text,/Вартість: 500 грн/);
+  await closePoll(h,p.id);assert.match(h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).at(-1).text,/Вартість: 500 грн/);
   await h.cb(1,`pollctl:results:${p.id}`);assert.match(h.calls.at(-1).text,/Вартість: 500 грн/);
  }finally{h.close();}
 });
@@ -1009,9 +1011,39 @@ test('automatic registration sends a short admin notice without approval buttons
  const h=harness();try{
   h.apiOverride=method=>method==='getChatMember'?Response.json({ok:true,result:{status:'member'}}):undefined;
   await register(h,2,{role:'family'});
-  const notices=()=>h.calls.filter(c=>c.method==='sendMessage'&&Number(c.chat_id)===1&&c.text.startsWith('✅ Зареєстровано:'));
+  const notices=()=>h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===1&&c.text.startsWith('✅ Зареєстровано:'));
   assert.equal(notices().length,1);assert.equal(notices()[0].text,'✅ Зареєстровано: Person 2\nКвартира 25 · Член сім’ї\nHouse 1');assert.equal(notices()[0].reply_markup,undefined);
   await h.msg(2,'/start group_100001');assert.equal(notices().length,1);
   await register(h,2,{kind:'commercial',business:'Кав’ярня'});assert.equal(notices().length,2);assert.match(notices()[1].text,/Кав’ярня/);
  }finally{h.close();}
+});
+
+test('rich poll preview contains real text and inline controls without fake voting callbacks',async()=>{
+ const {richPollPreview}=await import('../src/poll-rich-preview.ts');
+ const preview=richPollPreview({title:'Ремонт <ліфта>',description:'Перший рядок\nДругий рядок',options:['Підтримую','Ні'],counts:[3,1],daysRemaining:5});
+ assert.match(preview.html,/Ремонт &lt;ліфта&gt;/);assert.match(preview.html,/Перший рядок<br\/>Другий рядок/);assert.match(preview.html,/75%/);assert.match(preview.html,/25%/);
+ assert.equal((preview.html.match(/type="disabled"/g)||[]).length,2);assert.ok(!preview.html.includes('callback_data'));assert.ok(!preview.html.includes('<img'));assert.match(preview.html,/голоси не збираються/);assert.ok(preview.html.indexOf('</table>')<preview.html.indexOf('<tg-button-row>'));assert.match(preview.html,/Проголосувати · 3 голоси/);assert.match(preview.html,/Проголосувати · 1 голос</);assert.ok(!preview.html.includes('1. Підтримую'));assert.ok(!preview.html.includes('Одне приміщення'));
+});
+
+
+
+test('rich group votes update counts and public premises only, with no preview or personal selection states',async()=>{
+ const h=harness();try{
+  await register(h,2,{number:'84a',floor:'14'});await register(h,3,{kind:'commercial',business:'Кав’ярня <Нова>'});const p=await poll(h);
+  const first=h.calls.find(c=>c.method==='sendRichMessage'&&Number(c.chat_id)===p.chat_id);assert.match(first.rich_message.html,/Проголосували <b>0 приміщень/);
+  await cast(h,2,p,0);await cast(h,3,p,1);
+  const html=h.calls.findLast(c=>c.method==='editMessageText').rich_message.html;
+  assert.match(html,/Проголосували <b>2 приміщення<\/b>: 84А, Кав’ярня &lt;Нова&gt;/);assert.equal((html.match(/<b>50%<\/b>/g)||[]).length,2);
+  assert.ok(!html.includes('Ваш голос'));assert.ok(!html.includes('Приклад'));assert.ok(!html.includes('callback_data="'));assert.ok(!html.includes('+380'));assert.ok(!html.includes('Person'));
+  await cast(h,2,p,1);const changed=h.calls.findLast(c=>c.method==='editMessageText').rich_message.html;
+  assert.match(changed,/Проголосували <b>2 приміщення/);assert.match(changed,/Проголосувати · 2 голоси/);assert.equal((changed.match(/84А/g)||[]).length,1);
+ }finally{h.close();}
+});
+
+test('rich layout keeps summary above description and buttons under options, handles empty totals and deadlines',async()=>{
+ const {richPollCard}=await import('../src/poll-layout.ts');
+ const card=richPollCard({title:'Title',description:'Full <description>',options:['Yes','No'],counts:[12,8],votedPremises:['12','15','25','74','84А','Кав’ярня','99'],pollId:17,endsAt:5000,now:4000}).html;
+ assert.ok(card.indexOf('Проголосували')<card.indexOf('<hr/>'));assert.ok(card.indexOf('<hr/>')<card.indexOf('Full &lt;description&gt;'));assert.match(card,/Кав’ярня та ще 14/);assert.match(card,/Залишилось: 17 хв/);
+ assert.ok(card.indexOf('Yes')<card.indexOf('data="vote:17:0"'));assert.ok(card.indexOf('data="vote:17:0"')<card.indexOf('>No<'));
+ const empty=richPollCard({title:'Empty',options:['Yes','No'],counts:[0,0],closed:true}).html;assert.match(empty,/Голосів не подано/);assert.ok(!empty.includes('<tg-button'));assert.ok(!empty.includes('NaN'));
 });

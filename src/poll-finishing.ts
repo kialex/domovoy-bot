@@ -1,7 +1,7 @@
+import { sendPollView } from './poll-view.ts';
 import type { Env } from './env.ts';
 import { getGroup, isConnected } from './groups.ts';
 import { livePollView, refreshPoll } from './polls.ts';
-import { sendHtml } from './telegram.ts';
 import { cleanupPollCopies } from './poll-reposting.ts';
 
 export async function finishPoll(env:Env,id:number):Promise<boolean> {
@@ -20,7 +20,7 @@ export async function finishPoll(env:Env,id:number):Promise<boolean> {
   try{
     const view=await livePollView(env,p);
     // Publish a separate final outcome before deleting the voting card.
-    const result=await sendHtml(env,p.chat_id,view.text);
+    const result=await sendPollView(env,p.chat_id,view);
     const committed=await env.HOME_DB.batch([
       env.HOME_DB.prepare("UPDATE polls SET result_message_id=?,message_id=?,published_at=unixepoch() WHERE id=? AND status='closed' AND result_message_id IS NULL AND repost_lease=?").bind(result.message_id,result.message_id,id,lease),
       env.HOME_DB.prepare(`INSERT INTO poll_message_cleanup(poll_id,chat_id,message_id) SELECT id,chat_id,? FROM polls

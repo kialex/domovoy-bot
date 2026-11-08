@@ -8,7 +8,7 @@ export class TelegramError extends Error {
   }
 }
 export async function telegram<T = unknown>(env: Env, method: string, body: object): Promise<T> {
-  if(method==='sendMessage'){
+  if(method==='sendMessage'||method==='sendRichMessage'){
     const target=body as {chat_id?:number|string};const uid=Number(target.chat_id);
     if(Number.isSafeInteger(uid)&&uid>0){const chat=await env.HOME_DB.prepare('SELECT chat_id FROM private_chats WHERE user_id=?').bind(uid).first<{chat_id:number}>();if(chat)body={...body,chat_id:chat.chat_id};}
   }

@@ -1,3 +1,5 @@
+import { richPollCard } from './poll-layout.ts';
+import { sendPollView, editPollView } from './poll-view.ts';
 import { pollLink } from './resident-menu.ts';
 import { validInterval, validDuration } from './poll-settings.ts';
 import { ownMemberships, premiseLabel, roleLabel } from './premises.ts';
@@ -33,7 +35,7 @@ export async function createPoll(env: Env, input: string | { question: string; d
   if (poll.chat_id !== chatId || poll.status !== 'draft') return false;
   const initialEnd=durationDays?Math.floor(Date.now()/1000)+durationDays*86400:null;
   const view = await livePollView(env, {...poll,ends_at:initialEnd});
-  const message = await sendHtml(env, poll.chat_id, view.text, view.buttons);
+  const message = await sendPollView(env,poll.chat_id,view);
   await env.HOME_DB.prepare("UPDATE polls SET message_id=?, status='open',published_at=unixepoch(),ends_at=CASE WHEN duration_days>0 THEN unixepoch()+duration_days*86400 ELSE NULL END,next_repost_at=CASE WHEN repost_interval>0 THEN unixepoch()+repost_interval ELSE NULL END WHERE id=? AND status='draft'").bind(message.message_id, poll.id).run();
   if(durationDays>0)await refreshPoll(env,poll.id);
   const {pollControls}=await import('./poll-reposting.ts');
@@ -42,9 +44,10 @@ export async function createPoll(env: Env, input: string | { question: string; d
 }
 export async function livePollView(env: Env, poll: Poll) {
   const options = JSON.parse(poll.options) as string[];
-  const { results } = await env.HOME_DB.prepare('SELECT option_index,COUNT(*) AS count FROM premise_votes WHERE poll_id=? GROUP BY option_index').bind(poll.id).all<{ option_index: number; count: number }>();
-  const counts = new Map(results.map(r => [r.option_index, r.count]));
+  const {results:votes}=await env.HOME_DB.prepare(`SELECT v.option_index,p.kind,p.number,p.business_name FROM premise_votes v JOIN premises p ON p.id=v.premise_id WHERE v.poll_id=? ORDER BY p.kind,p.number_start,p.number,p.business_name`).bind(poll.id).all<{option_index:number;kind:string;number:string;business_name:string}>();
+  const counts=new Map<number,number>();for(const vote of votes)counts.set(vote.option_index,(counts.get(vote.option_index)||0)+1);
   return {
+    rich_message:richPollCard({title:poll.question,description:poll.description,options,counts:options.map((_,i)=>counts.get(i)||0),votedPremises:votes.map(p=>p.kind==='commercial'?p.business_name||'Комерція':p.number),pollId:poll.id,closed:poll.status==='closed',endsAt:poll.ends_at,closedAt:poll.closed_at}),
     text: pollCard(poll.id, poll.question, options, counts, poll.status==='closed',{endsAt:poll.ends_at,closedAt:poll.closed_at,description:poll.description}),
     buttons: poll.status==='closed'?[]:[
       ...options.map((text, index) => [{ text: `${text} · ${counts.get(index) || 0}`, callback_data: `vote:${poll.id}:${index}` }]),
@@ -58,7 +61,7 @@ export async function refreshPoll(env:Env,id:number) {
     if(!poll || poll.status==='draft' || !poll.message_id || !isConnected(await getGroup(env,poll.chat_id)))return;
     const view=await livePollView(env,poll);
     try{
-      await telegram(env,'editMessageText',{chat_id:poll.chat_id,message_id:poll.message_id,text:view.text,parse_mode:'HTML',reply_markup:{inline_keyboard:view.buttons}});
+      await editPollView(env,poll.chat_id,poll.message_id,view);
     }catch(error){
       const latest=await env.HOME_DB.prepare('SELECT message_id FROM polls WHERE id=?').bind(id).first<{message_id:number}>();
       if(latest&&latest.message_id!==poll.message_id)continue;

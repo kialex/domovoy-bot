@@ -1,3 +1,4 @@
+import { sendPollView, editPollView } from './poll-view.ts';
 import { adminPollReport } from './poll-report.ts';
 import type { Button, Callback, Env } from './env.ts';
 import { getGroup, isConnected } from './groups.ts';
@@ -50,7 +51,7 @@ export async function cleanupPollCopies(env:Env,pollId?:number) {
         const latest=await env.HOME_DB.prepare('SELECT * FROM polls WHERE id=?').bind(copy.poll_id).first<RepostPoll>();
         if(latest?.status==='closed' && latest.result_message_id){
           const finalView=await livePollView(env,latest);
-          await telegram(env,'editMessageText',{chat_id:copy.chat_id,message_id:copy.message_id,text:finalView.text,parse_mode:'HTML',reply_markup:{inline_keyboard:[]}});
+          await editPollView(env,copy.chat_id,copy.message_id,finalView);
           await env.HOME_DB.prepare('UPDATE poll_message_cleanup SET redirected_to=? WHERE poll_id=? AND message_id=?').bind(latest.message_id,copy.poll_id,copy.message_id).run();
           continue;
         }
@@ -79,7 +80,7 @@ export async function raisePoll(env:Env,id:number,requestKey:string,scheduledDue
     if(!p||p.status!=='open'||(p.ends_at!==null&&p.ends_at<=Math.floor(Date.now()/1000))||!p.message_id)return 'unavailable';
     const view=await livePollView(env,p);
     // Publish first. Votes belong to the poll, never to its Telegram message.
-    const fresh=await sendHtml(env,p.chat_id,view.text,view.buttons);
+    const fresh=await sendPollView(env,p.chat_id,view);
     const result=await env.HOME_DB.batch([
       env.HOME_DB.prepare(`UPDATE polls SET message_id=?,published_at=unixepoch(),next_repost_at=CASE WHEN repost_interval>0 THEN unixepoch()+repost_interval ELSE NULL END,
         last_repost_key=? WHERE id=? AND status='open' AND (ends_at IS NULL OR ends_at>unixepoch()) AND repost_lease=? AND message_id=?`).bind(fresh.message_id,requestKey,id,lease,p.message_id),

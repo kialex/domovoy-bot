@@ -12,7 +12,7 @@ export interface Membership extends Premise {
   version: number; name: string; phone: string; application_token: string; details: string;
 }
 export const membershipSelect = `SELECT p.*,m.id AS membership_id,m.user_id,m.role,m.status,m.version,
-  m.application_token,m.details,u.name,u.phone FROM memberships m JOIN premises p ON p.id=m.premise_id JOIN profiles u ON u.user_id=m.user_id`;
+  m.application_token,m.details,u.name,u.phone FROM memberships m JOIN premises p ON p.id=m.premise_id JOIN profiles u ON u.id=m.profile_id`;
 export function entranceForApartment(value: string): number | null {
   const normalized=apartmentNumber(value);
   if(!normalized)return null;

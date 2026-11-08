@@ -127,7 +127,7 @@ export async function startRegistration(env: Env, uid: number, payload?: string,
     }
   }
   const defaults=await contactDefaults(env,uid);
-  const imported=defaults.ask_phone?await env.HOME_DB.prepare(`SELECT r.id FROM imported_residents r JOIN premises p ON p.id=r.premise_id WHERE p.chat_id=? AND r.claimed_by IS NULL LIMIT 1`).bind(chatId).first():null;
+  const imported=defaults.ask_phone?await env.HOME_DB.prepare(`SELECT u.id FROM profiles u JOIN memberships m ON m.profile_id=u.id JOIN premises p ON p.id=m.premise_id WHERE p.chat_id=? AND u.user_id IS NULL AND m.status='approved' LIMIT 1`).bind(chatId).first():null;
   const s: Session = { user_id: uid, chat_id: chatId, token: token(), step: imported?'phone':'kind', data: JSON.stringify({ poll_id: pollId, ...defaults,phone_first:!!imported }) };
   await env.HOME_DB.prepare("INSERT INTO sessions(user_id,chat_id,token,step,data) VALUES (?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id,token=excluded.token,step=excluded.step,data=excluded.data,updated_at=unixepoch()")
     .bind(uid,chatId,s.token,s.step,s.data).run();
@@ -288,9 +288,9 @@ export async function registrationCallback(env: Env,q: Callback): Promise<boolea
   try {
   await env.HOME_DB.batch([
     env.HOME_DB.prepare('INSERT INTO profiles(user_id,name,phone) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET name=excluded.name,phone=excluded.phone,updated_at=unixepoch()').bind(s.user_id,f.name,ukrainianPhone(f.phone!)!),
-    env.HOME_DB.prepare(`INSERT INTO memberships(user_id,premise_id,role,status,application_token,details) VALUES (?,?,?,?,?,?)
+    env.HOME_DB.prepare(`INSERT INTO memberships(profile_id,user_id,premise_id,role,status,application_token,details) VALUES ((SELECT id FROM profiles WHERE user_id=?),?,?,?,?,?,?)
       ON CONFLICT(user_id,premise_id) DO UPDATE SET role=excluded.role,status=excluded.status,application_token=excluded.application_token,details=excluded.details,version=memberships.version+1,reviewed_by=NULL,reviewed_at=NULL
-      WHERE memberships.status IN ('rejected','revoked') OR (memberships.status='pending' AND excluded.status='approved')`).bind(s.user_id,p.id,f.role,status,s.token,JSON.stringify(f)),
+      WHERE memberships.status IN ('rejected','revoked') OR (memberships.status='pending' AND excluded.status='approved')`).bind(s.user_id,s.user_id,p.id,f.role,status,s.token,JSON.stringify(f)),
     ...(inGroup&&f.floor!==undefined?[env.HOME_DB.prepare("UPDATE premises SET floor=?,entrance=? WHERE id=? AND NOT EXISTS (SELECT 1 FROM memberships WHERE premise_id=? AND status='approved' AND user_id!=?)").bind(f.floor,f.entrance!,p.id,p.id,s.user_id)]:[]),
     ...(inGroup?[env.HOME_DB.prepare("INSERT INTO membership_audit(actor_id,membership_id,action) SELECT ?,id,'auto_approve_group_member' FROM memberships WHERE user_id=? AND premise_id=? AND application_token=?").bind(s.user_id,s.user_id,p.id,s.token)]:[]),
     env.HOME_DB.prepare('DELETE FROM sessions WHERE user_id=? AND token=?').bind(s.user_id,s.token),

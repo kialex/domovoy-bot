@@ -91,10 +91,12 @@ const currentVotes=h=>h.sqlite.prepare('SELECT * FROM premise_votes ORDER BY pre
 function importContact(h,number,phone='+380671234567',chat=-100001){
   const n=Number(number);const entrance=n<=84?1:n<=133?2:3;
   const pid=Number(h.sqlite.prepare("INSERT INTO premises(chat_id,kind,number,entrance,floor,number_start,number_end) VALUES (?,'apartment',?,?,2,?,?)").run(chat,number,entrance,n,n).lastInsertRowid);
-  h.sqlite.prepare("INSERT INTO imported_residents(premise_id,name,phone) VALUES (?,'Олена',?)").run(pid,phone);
+  let profile=h.sqlite.prepare('SELECT id FROM profiles WHERE phone=?').get(phone);
+  if(!profile)profile={id:Number(h.sqlite.prepare("INSERT INTO profiles(name,phone) VALUES ('Олена',?)").run(phone).lastInsertRowid)};
+  h.sqlite.prepare("INSERT INTO memberships(profile_id,premise_id,role,status,application_token) VALUES (?,?,'owner','approved','import')").run(profile.id,pid);
   return pid;
 }
-test('imported contacts appear without profile links; phone claims all apartments in this house only',async()=>{
+test('unlinked profiles appear without Telegram links; phone links all apartments in place',async()=>{
   const h=harness(2);try{
     const pid=importContact(h,'25');importContact(h,'26');importContact(h,'27','+380671234567',-100002);
     await h.cb(1,`directory:tree:-100001:1:2:${pid}:0`);
@@ -103,9 +105,10 @@ test('imported contacts appear without profile links; phone claims all apartment
     await h.cb(2,'resident:add:-100001');assert.equal(h.form(2).step,'phone');
     await h.msg(2,'067 123 45 67');assert.equal(h.form(2),undefined);
     assert.equal(h.sqlite.prepare('SELECT name FROM profiles WHERE user_id=2').get().name,'Олена');
-    assert.equal(h.sqlite.prepare("SELECT count(*) n FROM memberships WHERE user_id=2 AND status='approved' AND role='owner'").get().n,2);
-    assert.equal(h.sqlite.prepare('SELECT count(*) n FROM imported_residents WHERE claimed_by IS NULL').get().n,1);
+    assert.equal(h.sqlite.prepare("SELECT count(*) n FROM memberships WHERE user_id=2 AND status='approved' AND role='owner'").get().n,3);
+    assert.equal(h.sqlite.prepare('SELECT count(*) n FROM profiles WHERE user_id IS NULL').get().n,0);
     await h.cb(1,`directory:tree:-100001:1:2:${pid}:0`);assert.doesNotMatch(h.calls.at(-1).text,/Не підтвердив реєстрацію/);
+    importContact(h,'28','+380679999999',-100002);
     await h.cb(3,'resident:add:-100002');await h.msg(3,'+380671234567');assert.match(h.calls.at(-1).text,/Цей номер уже використовується/);
     assert.equal(h.sqlite.prepare('SELECT count(*) n FROM profiles WHERE user_id=3').get().n,0);
   }finally{h.close();}
@@ -117,7 +120,7 @@ test('unknown imported phone continues ordinary registration without asking phon
     await h.cb(3,`reg:kind:${t}:apartment`);await h.msg(3,'26');await h.msg(3,'2');await h.msg(3,'Іван');
     assert.equal(h.form(3).step,'role');await h.cb(3,`reg:role:${t}:owner`);await h.cb(3,`reg:submit:${t}`);
     assert.equal(h.member(3,'26').status,'pending');
-    assert.equal(h.sqlite.prepare('SELECT count(*) n FROM imported_residents WHERE claimed_by IS NULL').get().n,1);
+    assert.equal(h.sqlite.prepare('SELECT count(*) n FROM profiles WHERE user_id IS NULL').get().n,1);
   }finally{h.close();}
 });
 test('phone ownership is rechecked at submission and enforced by database',async()=>{
@@ -129,6 +132,28 @@ test('phone ownership is rechecked at submission and enforced by database',async
     assert.equal(h.sqlite.prepare('SELECT count(*) n FROM memberships').get().n,0);
     assert.throws(()=>h.sqlite.prepare("INSERT INTO profiles(user_id,name,phone) VALUES (4,'Олег','+380671234567')").run(),/phone_already_linked/);
   }finally{h.close();}
+});
+
+test('unified profile migration preserves membership IDs, audit, votes and staged contacts',()=>{
+  const {sqlite}=database('0022');try{
+    sqlite.exec(`INSERT INTO profiles(user_id,name,phone) VALUES (42,'Олег','+380671111111');
+      INSERT INTO premises(id,chat_id,kind,number,number_start,number_end) VALUES (1,-100001,'apartment','25',25,25);
+      INSERT INTO memberships(id,user_id,premise_id,role,status,application_token) VALUES (17,42,1,'owner','approved','old');
+      INSERT INTO membership_audit(actor_id,membership_id,action) VALUES (1,17,'approve');
+      INSERT INTO polls(id,source_update_id,chat_id,question,options,status,created_by) VALUES (1,1,-100001,'Question','["Yes","No"]','open',1);
+      INSERT INTO premise_votes(poll_id,premise_id,user_id,option_index) VALUES (1,1,42,0);
+      INSERT INTO imported_residents(premise_id,name,phone) VALUES (1,'Олена','+380672222222');
+      BEGIN;`);
+    sqlite.exec(readFileSync(new URL('../migrations/0022_unify_resident_profiles.sql',import.meta.url),'utf8'));
+    sqlite.exec('COMMIT');
+    assert.equal(sqlite.prepare('SELECT user_id FROM memberships WHERE id=17').get().user_id,42);
+    assert.equal(sqlite.prepare('SELECT membership_id FROM membership_audit').get().membership_id,17);
+    assert.equal(sqlite.prepare('SELECT user_id FROM premise_votes').get().user_id,42);
+    assert.equal(sqlite.prepare('SELECT name FROM profiles WHERE user_id IS NULL').get().name,'Олена');
+    assert.equal(sqlite.prepare('SELECT count(*) n FROM memberships WHERE user_id IS NULL').get().n,1);
+    assert.equal(sqlite.prepare("SELECT count(*) n FROM sqlite_master WHERE name IN ('imported_residents','directory_members','profiles_new','memberships_new')").get().n,0);
+    assert.equal(sqlite.prepare('PRAGMA foreign_key_check').all().length,0);
+  }finally{sqlite.close();}
 });
 
 test('house structure, commercial identities, phones and presentation validation',()=>{

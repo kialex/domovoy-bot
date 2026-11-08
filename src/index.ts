@@ -1,3 +1,4 @@
+import { FUNDS, fundsMenu, startMono, monoMessage, monoCallback, scheduledMono, clearMonoSetup } from './monobank.ts';
 import { retryGroupWelcomes } from './group-welcome.ts';
 import { joinRequest, joinCallback, retryJoins } from './join-requests.ts';
 import { HOUSE_RESIDENTS, houseResidents, directoryCallback } from './house-residents.ts';
@@ -20,7 +21,9 @@ async function message(env: Env, m: Message, updateId: number) {
   if (command === '/start' && args[0]?.startsWith('vote_')) return openVoteIntent(env, m.from.id, args[0].slice(5));
   if (command === '/id') return send(env, m.chat.id, `Ваш Telegram ID: ${m.from.id}`);
   const admin = String(m.from.id) === env.ADMIN_TELEGRAM_USER_ID;
-  if (admin && (command === '/menu' || text === ADMIN_ACTIONS.menu)) return adminMenu(env);
+  if (admin && (command === '/menu' || text === ADMIN_ACTIONS.menu)) {await clearMonoSetup(env);return adminMenu(env);}
+  if (admin && text === FUNDS) return fundsMenu(env);
+  if (admin && text === '➕ Додати збір') return startMono(env);
   if (admin && (text === ADMIN_ACTIONS.polls || command === '/polls')) return adminPollList(env);
   if (admin && text === '🗳 Активні голосування') return adminPollList(env,0,'open');
   if (admin && text === '🏁 Завершені голосування') return adminPollList(env,0,'closed');
@@ -42,7 +45,7 @@ async function message(env: Env, m: Message, updateId: number) {
   }
   if (command === '/start' || command === '/register') return startRegistration(env, m.from.id, args[0]);
   if (command === '/cancel' || (admin && text === ADMIN_ACTIONS.cancel)) {
-    if (admin) await cancelPollWizard(env);
+    if (admin) {await cancelPollWizard(env);await clearMonoSetup(env);}
     await env.HOME_DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(m.from.id).run();
     if (admin) return adminMenu(env);
     return residentMenu(env, m.from.id);
@@ -55,6 +58,7 @@ async function message(env: Env, m: Message, updateId: number) {
     return id ? pollControls(env,id) : adminPollList(env);
   }
   if (command === '/help') return admin ? adminMenu(env) : residentMenu(env,m.from.id);
+  if (await monoMessage(env,m)) return;
   const registration = await env.HOME_DB.prepare('SELECT user_id FROM sessions WHERE user_id=?').bind(m.from.id).first();
   if (registration) return registrationMessage(env, m);
   if (await pollWizardMessage(env, m)) return;
@@ -74,6 +78,7 @@ export async function handleUpdate(env: Env, update: Update) {
   if (update.callback_query) {
     const q = update.callback_query;
     if (q.from.is_bot) return;
+    if (await monoCallback(env,q)) return;
     if (await joinCallback(env,q)) return;
     if (await directoryCallback(env,q)) return;
     if (await pollControlCallback(env,q,update.update_id)) return;
@@ -90,6 +95,7 @@ export default {
     await scheduledReposts(env);
     await retryJoins(env);
     await retryGroupWelcomes(env);
+    await scheduledMono(env);
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const path = new URL(request.url).pathname;

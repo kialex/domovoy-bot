@@ -1067,3 +1067,100 @@ test('rich layout keeps summary above description and buttons under options, han
     assert.equal(currentVotes(h).length,1);
   }finally{h.close();}
 });
+
+const monoToken='test_monobank_token_12345678901234567890';
+async function monoSetup(h){
+  h.env.MONOBANK_ENCRYPTION_KEY='test-encryption-key-for-monobank-only';
+  const telegramFetch=globalThis.fetch;
+  h.monoOps=[];h.monoFailure=false;h.monoRequests=[];
+  globalThis.fetch=async(url,init)=>{
+    if(String(url).startsWith('https://api.monobank.ua/')){
+      h.monoRequests.push(String(url));
+      assert.equal(init.headers['X-Token'],monoToken);
+      if(h.monoFailure)return Response.json({errorDescription:'private detail'},{status:401});
+      if(String(url).endsWith('/client-info'))return Response.json({jars:[{id:'jar-1',title:'Генератор',currencyCode:980,balance:100000,goal:200000},{id:'jar-2',title:'Ремонт',currencyCode:980,balance:0}]});
+      return Response.json(h.monoOps);
+    }
+    return telegramFetch(url,init);
+  };
+  await h.msg(1,'➕ Додати збір');await h.msg(1,monoToken);
+  const s=h.sqlite.prepare('SELECT * FROM mono_setup').get();
+  assert.equal(s.step,'jar');
+  await h.cb(1,`mono:jar:${s.nonce}:0`);
+  await h.cb(1,`mono:group:${s.nonce}:-100001`);
+  return s.nonce;
+}
+async function saveMono(h,nonce){
+  await h.cb(1,`mono:preview:${nonce}`);await h.cb(1,`mono:save:${nonce}`);
+  return h.sqlite.prepare('SELECT * FROM mono_funds').get();
+}
+test('monobank setup deletes the token, encrypts it, selects the jar and limits management to the admin',async()=>{
+  const h=harness();try{
+    const nonce=await monoSetup(h);
+    assert.ok(h.calls.some(c=>c.method==='deleteMessage'));
+    assert.ok(h.calls.some(c=>c.text==='Яку банку відстежувати?'));
+    const connection=h.sqlite.prepare('SELECT * FROM mono_connections').get();
+    assert.equal(JSON.stringify(connection).includes(monoToken),false);
+    assert.equal(h.calls.some(c=>c.text?.includes(monoToken)),false);
+    await h.cb(2,`mono:save:${nonce}`);assert.equal(h.sqlite.prepare('SELECT count(*) n FROM mono_funds').get().n,0);
+    const f=await saveMono(h,nonce);assert.equal(f.jar_id,'jar-1');assert.equal(f.chat_id,-100001);
+    await h.cb(2,`mono:pause:${f.id}`);assert.equal(h.sqlite.prepare('SELECT active FROM mono_funds').get().active,1);
+    await h.cb(1,`mono:remove:${f.id}`);
+    let confirmation=h.sqlite.prepare('SELECT * FROM mono_setup').get();
+    await h.cb(1,`mono:confirmdelete:${nonce}`);assert.equal(h.sqlite.prepare('SELECT count(*) n FROM mono_funds').get().n,1);
+    await h.cb(1,`mono:confirmdelete:${confirmation.nonce}`);
+    assert.equal(h.sqlite.prepare('SELECT count(*) n FROM mono_funds').get().n,0);
+    assert.equal(h.sqlite.prepare('SELECT count(*) n FROM mono_connections').get().n,0);
+  }finally{h.close();}
+});
+test('monobank polling counts separate deposits once, ignores old and held operations and retries notification failures',async()=>{
+  const {scheduledMono}=await import('../src/monobank.ts');
+  const h=harness();try{
+    const f=await saveMono(h,await monoSetup(h));
+    h.monoOps=[{id:'old',time:f.started_at-10,amount:10000,balance:100000,hold:false},{id:'a',time:f.started_at,amount:240000,balance:340000,hold:false},{id:'held',time:f.started_at,amount:10000,balance:350000,hold:true}];
+    h.calls.length=0;h.fail='sendMessage';await scheduledMono(h.env);
+    assert.equal(h.sqlite.prepare('SELECT count(*) n FROM mono_operations').get().n,1);
+    assert.equal(h.sqlite.prepare('SELECT count(*) n FROM mono_outbox').get().n,2,'deposit and goal persisted despite delivery failure');
+    h.fail=null;h.sqlite.prepare('UPDATE mono_outbox SET lease_until=0').run();h.sqlite.prepare('UPDATE mono_connections SET last_request_at=0').run();
+    h.calls.length=0;await scheduledMono(h.env);
+    assert.equal(h.calls.filter(c=>isSend(c.method)&&c.chat_id===-100001).length,2);
+    assert.equal(h.sqlite.prepare('SELECT count(*) n FROM mono_outbox WHERE sent_at IS NOT NULL').get().n,2);
+    h.calls.length=0;h.sqlite.prepare('UPDATE mono_connections SET last_request_at=0').run();await scheduledMono(h.env);
+    assert.equal(h.calls.filter(c=>isSend(c.method)&&c.chat_id===-100001).length,0);
+    const before=h.monoRequests.length;await scheduledMono(h.env);assert.equal(h.monoRequests.length,before,'API cooldown enforced');
+    await h.cb(1,`mono:pause:${f.id}`);h.sqlite.prepare('UPDATE mono_connections SET last_request_at=0').run();await scheduledMono(h.env);assert.equal(h.monoRequests.length,before);
+  }finally{h.close();}
+});
+test('monobank errors do not leak token or response and disconnected groups receive nothing',async()=>{
+  const {scheduledMono}=await import('../src/monobank.ts');const h=harness();try{
+    await saveMono(h,await monoSetup(h));h.monoFailure=true;h.calls.length=0;
+    await scheduledMono(h.env);
+    assert.equal(h.sqlite.prepare('SELECT error FROM mono_funds').get().error,'unavailable');
+    assert.equal(JSON.stringify(h.calls).includes(monoToken),false);
+    assert.equal(JSON.stringify(h.calls).includes('private detail'),false);
+    h.sqlite.prepare('UPDATE groups SET version=version+1').run();h.sqlite.prepare('UPDATE mono_connections SET last_request_at=0').run();const before=h.monoRequests.length;
+    await scheduledMono(h.env);assert.equal(h.monoRequests.length,before);
+  }finally{h.close();}
+});
+
+test('monobank settings do not retroactively announce processed deposits, while held deposits can settle later',async()=>{
+  const {scheduledMono}=await import('../src/monobank.ts');const h=harness();try{
+    const nonce=await monoSetup(h);await h.cb(1,`mono:deposits:${nonce}`);const f=await saveMono(h,nonce);
+    h.monoOps=[{id:'a',time:f.started_at,amount:10000,balance:110000,hold:false},{id:'b',time:f.started_at,amount:10000,balance:120000,hold:true}];
+    await scheduledMono(h.env);assert.equal(h.sqlite.prepare('SELECT count(*) n FROM mono_outbox').get().n,0);
+    h.sqlite.prepare('UPDATE mono_funds SET deposits=1').run();h.sqlite.prepare('UPDATE mono_connections SET last_request_at=0').run();h.monoOps[1].hold=false;
+    await scheduledMono(h.env);
+    const rows=h.sqlite.prepare('SELECT event_key FROM mono_outbox').all();assert.deepEqual(rows.map(r=>r.event_key),['op:b']);
+  }finally{h.close();}
+});
+test('monobank daily summary uses Kyiv date, includes deposits only and is queued once per day',async()=>{
+  const {scheduledMono}=await import('../src/monobank.ts');const h=harness();const RealDate=Date;try{
+    const nonce=await monoSetup(h);await h.cb(1,`mono:daily:${nonce}`);await h.cb(1,`mono:deposits:${nonce}`);const f=await saveMono(h,nonce);
+    const target=new RealDate((f.started_at+86400)*1000);target.setUTCHours(18,5,0,0);
+    globalThis.Date=class extends RealDate {constructor(...args){super(...(args.length?args:[target.getTime()]));}static now(){return target.getTime();}};
+    const stamp=Math.floor(target.getTime()/1000);
+    h.monoOps=[{id:'a',time:stamp-60,amount:10000,balance:110000,hold:false},{id:'b',time:stamp-30,amount:-1000,balance:109000,hold:false}];
+    await scheduledMono(h.env);h.sqlite.prepare('UPDATE mono_connections SET last_request_at=0').run();await scheduledMono(h.env);
+    const rows=h.sqlite.prepare('SELECT * FROM mono_outbox').all();assert.equal(rows.length,1);assert.match(rows[0].event_key,/^daily:/);assert.match(rows[0].text,/За сьогодні <b>\+100 ₴<\/b>/);
+  }finally{globalThis.Date=RealDate;h.close();}
+});

@@ -1,5 +1,6 @@
 export interface Env {
   HOME_DB: D1Database;
+  MONOBANK_ENCRYPTION_KEY?: string;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET: string;
   ADMIN_TELEGRAM_USER_ID: string;

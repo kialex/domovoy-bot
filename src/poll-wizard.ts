@@ -1,3 +1,4 @@
+import { FUNDS } from './monobank.ts';
 import { HOUSE_RESIDENTS } from './house-residents.ts';
 import { durationLabel, POLL_DURATIONS, validDuration, intervalLabel, REPOST_INTERVALS, validInterval } from './poll-settings.ts';
 import { RESIDENT_ACTIONS } from './resident-menu.ts';
@@ -31,7 +32,7 @@ export async function adminMenu(env: Env, message?:string) {
       keyboard: [
         [{ text: ADMIN_ACTIONS.poll }, { text: ADMIN_ACTIONS.polls }],
         [{ text: ADMIN_ACTIONS.pending }, { text: ADMIN_ACTIONS.groups }],
-        [{ text: HOUSE_RESIDENTS }],
+        [{ text: HOUSE_RESIDENTS }, { text: FUNDS }],
         [{ text: RESIDENT_ACTIONS.data }, { text: RESIDENT_ACTIONS.units }],
         [{ text: RESIDENT_ACTIONS.add }, { text: RESIDENT_ACTIONS.polls }],
         [{ text: ADMIN_ACTIONS.menu }, { text: ADMIN_ACTIONS.cancel }],

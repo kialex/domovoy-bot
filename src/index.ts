@@ -1,3 +1,4 @@
+import { groupRequest, groupRequestCallback } from './group-requests.ts';
 import { FUNDS, fundsMenu, startMono, monoMessage, monoCallback, scheduledMono, clearMonoSetup } from './monobank.ts';
 import { retryGroupWelcomes } from './group-welcome.ts';
 import { joinRequest, joinCallback, retryJoins } from './join-requests.ts';
@@ -13,8 +14,8 @@ import { send } from './telegram.ts';
 import { positiveId } from './validation.ts';
 
 async function message(env: Env, m: Message, updateId: number) {
-  // Never request or echo registration data in a group.
-  if (!m.from || m.from.is_bot || m.chat.type !== 'private') return;
+  if (!m.from || m.from.is_bot) return;
+  if (m.chat.type !== 'private') return groupRequest(env,m);
   const text = m.text?.trim() || '';
   const [raw, ...args] = text.split(/\s+/);
   const command = raw.split('@')[0];
@@ -78,6 +79,7 @@ export async function handleUpdate(env: Env, update: Update) {
   if (update.callback_query) {
     const q = update.callback_query;
     if (q.from.is_bot) return;
+    if (await groupRequestCallback(env,q)) return;
     if (await monoCallback(env,q)) return;
     if (await joinCallback(env,q)) return;
     if (await directoryCallback(env,q)) return;

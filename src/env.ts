@@ -11,6 +11,9 @@ export interface Message {
   chat: { id: number; type: string };
   from?: User;
   text?: string;
+  entities?: {type:string;offset:number;length:number;user?:User}[];
+  reply_to_message?: Message;
+  message_thread_id?: number;
 }
 export interface Callback { id: string; from: User; data?: string; message?: Message }
 export interface ChatMemberUpdate {

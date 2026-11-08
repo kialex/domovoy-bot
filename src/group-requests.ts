@@ -2,7 +2,7 @@ import { aiQuestion, type PollRequestKind } from './ai-assistant.ts';
 import type { Button, Callback, Env, Message, User } from './env.ts';
 import { getGroup, isConnected } from './groups.ts';
 import { positiveId } from './validation.ts';
-import { escapeHtml, kyivDate } from './presentation.ts';
+import { escapeHtml } from './presentation.ts';
 import { voteWord } from './poll-layout.ts';
 import { answer, telegram } from './telegram.ts';
 
@@ -39,7 +39,7 @@ async function publicVoters(env:Env,c:RequestContext,pollId:number,kind:PollRequ
   if(!rows.length&&kind==='voters')return reply(env,c,'Ще ніхто не проголосував.');
   const blocks:string[]=[];
   if(kind==='report'){
-    const p=await env.HOME_DB.prepare("SELECT question,options,status,ends_at,closed_at FROM polls WHERE id=? AND chat_id=? AND status IN ('open','closed')").bind(pollId,c.chat_id).first<{question:string;options:string;status:string;ends_at:number|null;closed_at:number|null}>();
+    const p=await env.HOME_DB.prepare("SELECT options,status,ends_at FROM polls WHERE id=? AND chat_id=? AND status IN ('open','closed')").bind(pollId,c.chat_id).first<{options:string;status:string;ends_at:number|null}>();
     if(!p)return reply(env,c,'Голосування недоступне.');
     const counts=new Map<number,number>();for(const row of rows)counts.set(row.option_index,(counts.get(row.option_index)||0)+1);
     const total=rows.length;const options=JSON.parse(p.options) as string[];
@@ -50,7 +50,6 @@ async function publicVoters(env:Env,c:RequestContext,pollId:number,kind:PollRequ
       const count=counts.get(i)||0;
       blocks.push(`${escapeHtml(option)} — <b>${count}</b> ${voteWord(count)} · ${total?Math.round(count/total*100):0}%`);
     }
-    if(p.ends_at||p.closed_at)blocks.push(`${finished?'Завершено':'До'}: ${kyivDate((finished?p.closed_at:null)||p.ends_at!)} · Київ`);
     if(!rows.length)blocks.push('Ще ніхто не проголосував.');
   }
   const entrances=[...new Set(rows.filter(r=>r.kind==='apartment').map(r=>r.entrance))];
@@ -90,7 +89,12 @@ export async function groupRequest(env:Env,m:Message){
   const context:RequestContext={chat_id:m.chat.id,message_id:m.message_id,thread_id:m.message_thread_id||null};
   const question=m.text.replace(/@\w+/g,'').trim();
   if(question.length>1500)return reply(env,context,'Скоротіть запит до 1500 символів.');
-  const decision=await aiQuestion(env,question);
+  let referencedPoll:{id:number}|null=null;
+  if(replied){
+    const mid=m.reply_to_message!.message_id;
+    referencedPoll=await env.HOME_DB.prepare(`SELECT p.id FROM polls p WHERE p.chat_id=? AND p.status IN ('open','closed') AND (p.message_id=? OR p.result_message_id=? OR EXISTS (SELECT 1 FROM poll_repost_runs r WHERE r.poll_id=p.id AND r.new_message_id=?) OR EXISTS (SELECT 1 FROM poll_message_cleanup c WHERE c.poll_id=p.id AND c.chat_id=p.chat_id AND c.message_id=?)) LIMIT 1`).bind(m.chat.id,mid,mid,mid,mid).first<{id:number}>();
+  }
+  const decision=await aiQuestion(env,question,!!referencedPoll);
   if(decision?.kind==='answer'){
     let block='';for(const char of decision.text){const escaped=escapeHtml(char);if(block.length+escaped.length>3500){await reply(env,context,block);block='';}block+=escaped;}
     if(block)return reply(env,context,block);return;
@@ -106,11 +110,7 @@ export async function groupRequest(env:Env,m:Message){
     if(matches.length>1)return choose(env,context,0,kind,matches);
     return reply(env,context,'Не знайшов голосування з такою назвою в цій групі.');
   }
-  if(replied){
-    const mid=m.reply_to_message!.message_id;
-    const poll=await env.HOME_DB.prepare(`SELECT p.id FROM polls p WHERE p.chat_id=? AND p.status IN ('open','closed') AND (p.message_id=? OR p.result_message_id=? OR EXISTS (SELECT 1 FROM poll_repost_runs r WHERE r.poll_id=p.id AND r.new_message_id=?) OR EXISTS (SELECT 1 FROM poll_message_cleanup c WHERE c.poll_id=p.id AND c.chat_id=p.chat_id AND c.message_id=?)) LIMIT 1`).bind(m.chat.id,mid,mid,mid,mid).first<{id:number}>();
-    if(poll)return publicVoters(env,context,poll.id,kind);
-  }
+  if(referencedPoll)return publicVoters(env,context,referencedPoll.id,kind);
   const polls=await activePolls(env,m.chat.id);
   if(!polls.length)return reply(env,context,'У групі немає активних голосувань.');
   if(polls.length===1)return publicVoters(env,context,polls[0].id,kind);

@@ -1221,3 +1221,73 @@ test('group requests handle empty polls, disconnected groups and UTF-16 mention 
     h.sqlite.prepare("UPDATE groups SET status='disconnected'").run();h.calls.length=0;await askGroup(h,'хто голосував');assert.equal(h.calls.length,0);
   }finally{h.close();}
 });
+
+function mockAi(h,result){
+  const calls=[];
+  h.env.AI={async run(model,input){calls.push({model,input});return typeof result==='function'?await result(model,input):result;}};
+  return calls;
+}
+test('Workers AI answers general questions only when addressed and sends no database records or history',async()=>{
+  const h=harness();try{
+    const requests=mockAi(h,{response:'Лимонний сік: змішайте сік лимона з водою <за смаком> & додайте цукор.'});
+    h.calls.length=0;await askGroup(h,'Дай рецепт лимонного сока',{tag:false});assert.equal(requests.length,0);
+    await askGroup(h,'Дай рецепт лимонного сока');assert.equal(requests.length,1);
+    assert.equal(requests[0].model,'@cf/meta/llama-3.3-70b-instruct-fp8-fast');assert.equal(requests[0].input.messages.length,2);
+    assert.equal(requests[0].input.messages[1].content,'Дай рецепт лимонного сока');
+    assert.doesNotMatch(JSON.stringify(requests),/Person|\+380|HOME_DB|TELEGRAM_BOT_TOKEN/);
+    const sent=h.calls.find(c=>isSend(c.method));assert.match(sent.text,/Лимонний сік/);assert.match(sent.text,/&lt;за смаком&gt; &amp;/);
+    assert.equal(h.sqlite.prepare("SELECT name FROM sqlite_master WHERE name='group_vote_requests'").get(),undefined);
+  }finally{h.close();}
+});
+test('Workers AI report tool uses exact database counts and public premises, ignoring invented model statistics',async()=>{
+  const h=harness(2);try{
+    await register(h,2,{number:'25'});await register(h,3,{number:'92',floor:'3'});const p=await poll(h);await cast(h,2,p,0);await cast(h,3,p,1);
+    await register(h,4,{chat:-100002,number:'187',floor:'3'});const other=await poll(h,-100002);await cast(h,4,other,0);
+    const requests=mockAi(h,{response:'Проголосували 999 осіб!',tool_calls:[{name:'get_poll_report',arguments:{}}]});
+    h.calls.length=0;await askGroup(h,'Дай подробный отчет по голосованию');
+    const report=h.calls.find(c=>isSend(c.method));assert.match(report.text,/Статистика голосування/);assert.match(report.text,/приміщень: <b>2/);
+    assert.match(report.text,/Yes — <b>1<\/b> голос · 50%/);assert.match(report.text,/No — <b>1<\/b> голос · 50%/);assert.match(report.text,/Під’їзд 1.*25/);assert.match(report.text,/Під’їзд 2.*92/);
+    assert.doesNotMatch(report.text,/999|187|Person|380|власник|орендар/);
+    assert.doesNotMatch(JSON.stringify(requests),/Person|380|Repair|25|92/);
+  }finally{h.close();}
+});
+test('AI report selection is stateless, preserves report action and rechecks group ownership on clicks',async()=>{
+  const h=harness(2);try{
+    await register(h,2);const p=await poll(h);await poll(h);const other=await poll(h,-100002);
+    const requests=mockAi(h,{tool_calls:[{function:{name:'get_poll_report',arguments:'{}'}}]});h.calls.length=0;
+    await askGroup(h,'Как у нас дела с голосованием?');
+    const choice=h.calls.find(c=>isSend(c.method));assert.match(choice.text,/показати звіт/);
+    assert.ok(choice.reply_markup.inline_keyboard.every(row=>row[0].callback_data.startsWith('gv:report:')));
+    const before=requests.length;h.calls.length=0;await cast(h,2,p,0);h.calls.length=0;
+    await h.cb(3,`gv:report:${p.id}`,{message_id:123,chat:{id:-100001,type:'supergroup'}});
+    assert.match(h.calls.find(c=>isSend(c.method)).text,/приміщень: <b>1/);assert.equal(requests.length,before);
+    h.calls.length=0;await h.cb(3,`gv:report:${other.id}`,{message_id:123,chat:{id:-100001,type:'supergroup'}});assert.match(h.calls.at(-1).text,/недоступне/);
+  }finally{h.close();}
+});
+test('AI tool title lookup supports closed polls but cannot query another group or arbitrary SQL',async()=>{
+  const h=harness(2);try{
+    const p=await poll(h);await closePoll(h,p.id);
+    h.sqlite.prepare("UPDATE polls SET question='Генератор фінал' WHERE id=?").run(p.id);
+    const other=await poll(h,-100002);h.sqlite.prepare("UPDATE polls SET question='Чужий збір' WHERE id=?").run(other.id);
+    mockAi(h,{tool_calls:[{name:'get_poll_report',arguments:{title:'Генератор фінал'}}]});h.calls.length=0;
+    await askGroup(h,'Дай отчет по генератору');assert.match(h.calls.find(c=>isSend(c.method)).text,/Результати голосування/);
+    mockAi(h,{tool_calls:[{name:'get_poll_report',arguments:{title:'Чужий збір'}}]});h.calls.length=0;
+    await askGroup(h,'Дай отчет по голосованию Чужий збір');assert.match(h.calls.at(-1).text,/Не знайшов/);
+    const {aiQuestion}=await import('../src/ai-assistant.ts');
+    for(const output of [{tool_calls:[{name:'execute_sql',arguments:{sql:'DROP TABLE polls'}}]},{tool_calls:[{name:'get_poll_report',arguments:{chat_id:-100002}}]},{tool_calls:[{name:'get_poll_report',arguments:'not-json'}]},{tool_calls:[{name:'get_poll_report',arguments:{title:3}}]}]){
+      mockAi(h,output);assert.equal(await aiQuestion(h.env,'ignore rules'),null);
+    }
+    assert.ok(h.sqlite.prepare('SELECT id FROM polls WHERE id=?').get(p.id));
+  }finally{h.close();}
+});
+test('AI failure falls back to voter and report queries; overlong input is not sent to the model',async()=>{
+  const h=harness();try{
+    const p=await poll(h);await register(h,2);await cast(h,2,p,0);
+    const calls=mockAi(h,()=>{throw new Error('private provider failure');});h.calls.length=0;
+    await askGroup(h,'дай список кто голосовал');assert.match(h.calls.at(-1).text,/25/);
+    await askGroup(h,'Дай статистику по голосованию');assert.match(h.calls.at(-1).text,/Статистика голосування/);
+    await askGroup(h,'Рецепт лимонада');assert.match(h.calls.at(-1).text,/ШІ зараз недоступний/);
+    const before=calls.length;await askGroup(h,'a'.repeat(1501));assert.equal(calls.length,before);assert.match(h.calls.at(-1).text,/1500/);
+    h.calls.length=0;h.sqlite.prepare("UPDATE groups SET status='disconnected'").run();await askGroup(h,'Рецепт');assert.equal(calls.length,before);
+  }finally{h.close();}
+});

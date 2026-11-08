@@ -1,5 +1,6 @@
 export interface Env {
   HOME_DB: D1Database;
+  AI?: Pick<Ai,'run'>;
   MONOBANK_ENCRYPTION_KEY?: string;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET: string;

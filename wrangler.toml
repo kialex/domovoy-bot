@@ -15,3 +15,6 @@ migrations_dir = "migrations"
 
 [triggers]
 crons = ["*/5 * * * *"]
+
+[ai]
+binding = "AI"

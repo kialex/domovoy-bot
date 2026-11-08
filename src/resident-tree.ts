@@ -1,7 +1,7 @@
 import type { Button, Env } from './env.ts';
 import { getGroup, isConnected } from './groups.ts';
-import { escapeHtml } from './presentation.ts';
-import { membershipSelect, roleLabel } from './premises.ts';
+import { escapeHtml, telegramProfileLink } from './presentation.ts';
+import { membershipSelect, roleLabel, roleIcon } from './premises.ts';
 import type { Membership, Premise } from './premises.ts';
 import { telegram } from './telegram.ts';
 
@@ -17,9 +17,12 @@ export function parseTreeState(parts:string[]):TreeState|null{
   const s={chat:Number(chat),entrance,floor,unit:Number(unit),page:Number(page)};
   return Number.isSafeInteger(s.chat)&&Number.isSafeInteger(s.unit)&&Number.isSafeInteger(s.page)&&s.page<=100000?s:null;
 }
+const action=(text:string,data:string)=>`<tg-button type="callback_data" style="link" data="${escapeHtml(data)}">${escapeHtml(text)}</tg-button>`;
 async function show(env:Env,text:string,buttons:Button[][],messageId?:number){
-  return telegram(env,messageId?'editMessageText':'sendMessage',{
-    chat_id:env.ADMIN_TELEGRAM_USER_ID,...(messageId?{message_id:messageId}:{}),text,parse_mode:'HTML',reply_markup:{inline_keyboard:buttons},
+  const controls=buttons.map(row=>`<p>${row.map(b=>b.callback_data?action(b.text,b.callback_data):escapeHtml(b.text)).join(' · ')}</p>`).join('');
+  return telegram(env,messageId?'editMessageText':'sendRichMessage',{
+    chat_id:env.ADMIN_TELEGRAM_USER_ID,...(messageId?{message_id:messageId,reply_markup:{inline_keyboard:[]}}:{}),
+    rich_message:{html:`<p>${text.replace(/\n/g,'<br/>')}</p>${controls}`},
   });
 }
 export async function residentTree(env:Env,s:TreeState,messageId?:number){
@@ -41,62 +44,49 @@ export async function residentTree(env:Env,s:TreeState,messageId?:number){
   const visibleUnits=levelUnits.slice(unitPage*UNITS_PER_PAGE,(unitPage+1)*UNITS_PER_PAGE);
   const peoplePage=selected?Math.min(s.page,Math.max(0,Math.ceil(selected.member_count/PEOPLE_PER_PAGE)-1)):0;
   const people=selected?(await env.HOME_DB.prepare(`${membershipSelect.replace('SELECT p.*','SELECT u.telegram_username,p.*')} WHERE p.id=? AND m.status IN ('approved','pending') ORDER BY u.name,m.id LIMIT ? OFFSET ?`).bind(selected.id,PEOPLE_PER_PAGE+1,peoplePage*PEOPLE_PER_PAGE).all<Membership>()).results:[];
-  const lines=[`🏠 <b>${escapeHtml(clean(group.title,80))}</b>`];
+  const base={...s,unit:0,page:0};
+  const root={...base,entrance:ROOT,floor:ROOT};
+  const branchAction=(text:string,state:TreeState)=>action(text,treeData(state));
+  const lines=[`🏠 ${branchAction(clean(group.title,80),root)}`];
   const line=(prefix:string,content:string)=>lines.push(`<code>${prefix.replace(/ /g,' ')}</code>${content}`);
   const peopleLines=(prefix:string)=>{
     people.slice(0,PEOPLE_PER_PAGE).forEach((m,i)=>{
       const last=i===Math.min(people.length,PEOPLE_PER_PAGE)-1;
-      const nick=m.telegram_username?` · @${escapeHtml(m.telegram_username)}`:'';
-      line(prefix+(last?'└── ':'├── '),`${escapeHtml(clean(m.name,100))}${nick} · ${roleLabel(m.role)}${m.status==='pending'?' · ⏳ Заявка':''}`);
-      line(prefix+(last?'    ':'│   '),`📞 ${escapeHtml(m.phone)}`);
+      const details=prefix+(last?'   ':'│  ');
+      line(prefix+(last?'└─ ':'├─ '),`👤 ${telegramProfileLink(m.user_id,clean(m.name,100),m.telegram_username)}`);
+      line(details,`${roleIcon(m.role)} ${roleLabel(m.role)}${m.status==='pending'?' · ⏳ Заявка':''}`);
+      if(m.telegram_username)line(details,telegramProfileLink(m.user_id,`@${m.telegram_username}`,m.telegram_username));
+      line(details,`📞 ${escapeHtml(m.phone)}`);
     });
-    if(people.length>PEOPLE_PER_PAGE)line(prefix,'… інші мешканці на наступній сторінці');
+    const nav:string[]=[];
+    if(peoplePage>0)nav.push(branchAction('← Мешканці',{...s,page:peoplePage-1}));
+    if(people.length>PEOPLE_PER_PAGE)nav.push(branchAction('Мешканці →',{...s,page:peoplePage+1}));
+    if(nav.length)line(prefix,nav.join(' · '));
   };
   const unitLines=(prefix:string)=>{
-    if(unitPage>0)line(prefix,'…');
+    if(unitPage>0)line(prefix,branchAction('← Попередні приміщення',{...base,page:unitPage-1}));
     visibleUnits.forEach((p,i)=>{
-      const last=i===visibleUnits.length-1;const tail=last?'└── ':'├── ';
+      const last=i===visibleUnits.length-1;const tail=last?'└─ ':'├─ ';const open=p.id===s.unit;
       const name=p.kind==='commercial'?clean(p.business_name,60):`Кв. ${p.number}`;
-      line(prefix+tail,`${escapeHtml(name)}${p.id===s.unit?'':` · ${p.member_count}`}`);
-      if(p.id===s.unit)peopleLines(prefix+(last?'    ':'│   '));
+      line(prefix+tail,branchAction(`${open?'▾':'▸'} ${name}`,{...base,unit:open?0:p.id,page:open?unitPage:0}));
+      if(open)peopleLines(prefix+(last?'   ':'│  '));
     });
-    if(levelUnits.length>(unitPage+1)*UNITS_PER_PAGE)line(prefix,'…');
+    if(levelUnits.length>(unitPage+1)*UNITS_PER_PAGE)line(prefix,branchAction('Наступні приміщення →',{...base,page:unitPage+1}));
   };
   branches.forEach((branch,i)=>{
-    const last=i===branches.length-1;const prefix=last?'    ':'│   ';
-    line(last?'└── ':'├── ',`<b>${branch==='c'?'Комерція':branch===UNKNOWN?'Під’їзд не вказано':`Під’їзд ${branch}`}</b>`);
-    if(branch!==s.entrance)return;
+    const last=i===branches.length-1;const prefix=last?'   ':'│  ';const open=branch===s.entrance;
+    const title=branch==='c'?'Комерція':branch===UNKNOWN?'Під’їзд не вказано':`Під’їзд ${branch}`;
+    line(last?'└─ ':'├─ ',branchAction(`${open?'▾':'▸'} ${title}`,open?root:{...root,entrance:branch}));
+    if(!open)return;
     if(branch==='c'){unitLines(prefix);return;}
     floors.forEach((floor,j)=>{
-      const end=j===floors.length-1;
-      line(prefix+(end?'└── ':'├── '),floor===UNKNOWN?'Поверх не вказано':`Поверх ${floor}`);
-      if(floor===s.floor)unitLines(prefix+(end?'    ':'│   '));
+      const end=j===floors.length-1;const expanded=floor===s.floor;
+      const title=floor===UNKNOWN?'Поверх не вказано':`Поверх ${floor}`;
+      line(prefix+(end?'└─ ':'├─ '),branchAction(`${expanded?'▾':'▸'} ${title}`,{...base,floor:expanded?ROOT:floor}));
+      if(expanded)unitLines(prefix+(end?'   ':'│  '));
     });
   });
-  const buttons:Button[][]=[];
-  const add=(text:string,state:TreeState)=>buttons.push([{text,callback_data:treeData(state)}]);
-  const base={...s,unit:0,page:0};
-  if(selected){
-    for(const m of people.slice(0,PEOPLE_PER_PAGE))buttons.push([{text:`${clean(m.name,36)} · ${roleLabel(m.role)}`,callback_data:`directory:person:${m.membership_id}`}]);
-    const nav:Button[]=[];
-    if(peoplePage>0)nav.push({text:'← Мешканці',callback_data:treeData({...s,page:peoplePage-1})});
-    if(people.length>PEOPLE_PER_PAGE)nav.push({text:'Мешканці →',callback_data:treeData({...s,page:peoplePage+1})});
-    if(nav.length)buttons.push(nav);
-    add('← Згорнути приміщення',{...base,page:unitPage});
-  }else if(s.entrance==='c'||s.floor!==ROOT){
-    for(const p of visibleUnits)add(p.kind==='commercial'?clean(p.business_name,50):`Квартира ${p.number} · ${p.member_count}`,{...base,unit:p.id});
-    const nav:Button[]=[];
-    if(unitPage>0)nav.push({text:'← Назад',callback_data:treeData({...base,page:unitPage-1})});
-    if(levelUnits.length>(unitPage+1)*UNITS_PER_PAGE)nav.push({text:'Далі →',callback_data:treeData({...base,page:unitPage+1})});
-    if(nav.length)buttons.push(nav);
-    add(s.entrance==='c'?'← Згорнути комерцію':'← Згорнути поверх',s.entrance==='c'?{...base,entrance:ROOT,floor:ROOT}:{...base,floor:ROOT});
-  }else if(s.entrance!==ROOT){
-    for(const floor of floors)add(floor===UNKNOWN?'Поверх не вказано':`Поверх ${floor}`,{...base,floor});
-    add('← Згорнути під’їзд',{...base,entrance:ROOT,floor:ROOT});
-  }else{
-    for(const branch of branches)add(branch==='c'?'Комерція':branch===UNKNOWN?'Під’їзд не вказано':`Під’їзд ${branch}`,{...base,entrance:branch});
-  }
-  return show(env,lines.join('\n'),buttons,messageId);
+  return show(env,lines.join('\n'),[],messageId);
 }
 export async function unitTree(env:Env,id:number,page:number,messageId?:number){
   const p=await env.HOME_DB.prepare('SELECT * FROM premises WHERE id=?').bind(id).first<Premise>();

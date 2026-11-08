@@ -1,6 +1,12 @@
 export function escapeHtml(value: string): string {
   return value.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+export function telegramProfileLink(userId:number,label:string,username?:string) {
+  const text=escapeHtml(label);
+  if(!Number.isSafeInteger(userId)||userId<=0)return text;
+  const url=username&&/^[A-Za-z0-9_]{1,32}$/.test(username)?`https://t.me/${username}`:`tg://user?id=${userId}`;
+  return `<a href="${url}">${text}</a>`;
+}
 export function kyivDate(timestamp:number) {
   return new Intl.DateTimeFormat('uk-UA',{timeZone:'Europe/Kyiv',day:'numeric',month:'long',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(timestamp*1000));
 }

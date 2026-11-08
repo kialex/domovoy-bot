@@ -30,6 +30,7 @@ export function validFloor(kind: string, entrance: number, value: string): numbe
   return floor >= minimum && floor <= maximum ? floor : null;
 }
 export const premiseLabel = (p: Pick<Premise, 'kind' | 'number'> & Partial<Pick<Premise, 'business_name'>>) => p.kind === 'apartment' ? `Квартира ${p.number}` : `🏪 ${p.business_name || 'Комерція'}`;
+export const roleIcon=(role:string)=>({owner:'🔑',tenant:'🏠',family:'👪'} as Record<string,string>)[role]||'👤';
 export const roleLabel = (role: string) => ({owner:'Власник',tenant:'Орендар',family:'Член сім’ї'} as Record<string,string>)[role] || 'Мешканець';
 export async function ownMemberships(env: Env, uid: number, chatId?: number, approvedOnly = false) {
   return (await env.HOME_DB.prepare(`${membershipSelect.replace('SELECT p.*', 'SELECT g.title AS group_title,p.*')} JOIN groups g ON g.chat_id=p.chat_id WHERE m.user_id=? AND g.status='approved' AND g.bot_present=1 ${chatId ? 'AND p.chat_id=?' : ''} ${approvedOnly ? "AND m.status='approved' AND u.phone GLOB '+380[1-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'" : "AND m.status IN ('pending','approved')"} ORDER BY p.chat_id,p.kind,p.number_start`)

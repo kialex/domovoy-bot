@@ -686,14 +686,20 @@ test('registration asks each field briefly without repeated headers or duplicate
  }finally{h.close();}
 });
 
+function directoryActions(call){
+ const buttons=(call.reply_markup?.inline_keyboard||[]).flat();
+ const inline=[...(call.rich_message?.html||'').matchAll(/<tg-button[^>]*data="([^"]+)"[^>]*>([^<]*)<\/tg-button>/g)].map(m=>({callback_data:m[1],text:m[2]}));
+ return [...buttons,...inline];
+}
+
 test('admin directory opens other apartments, contacts and confirmed owner revocation',async()=>{
  const h=harness();try{
   const m=await register(h,2,{number:'95',floor:'3'});const p=await poll(h);await cast(h,2,p,0);
   await h.msg(1,'🏠 Головне меню');assert.ok(h.calls.at(-1).reply_markup.keyboard.flat().some(b=>b.text==='👥 Мешканці будинку'));
-  await h.msg(1,'👥 Мешканці будинку');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='directory:tree:-100001:2:-:0:0'));
-  await h.cb(1,'directory:tree:-100001:2:-:0:0');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='directory:tree:-100001:2:3:0:0'));
-  await h.cb(1,'directory:tree:-100001:2:3:0:0');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`directory:tree:-100001:2:3:${m.premise_id}:0`));
-  await h.cb(1,`directory:members:${m.premise_id}:0`);assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`directory:person:${m.id}`));
+  await h.msg(1,'👥 Мешканці будинку');assert.ok(directoryActions(h.calls.at(-1)).some(b=>b.callback_data==='directory:tree:-100001:2:-:0:0'));
+  await h.cb(1,'directory:tree:-100001:2:-:0:0');assert.ok(directoryActions(h.calls.at(-1)).some(b=>b.callback_data==='directory:tree:-100001:2:3:0:0'));
+  await h.cb(1,'directory:tree:-100001:2:3:0:0');assert.ok(directoryActions(h.calls.at(-1)).some(b=>b.callback_data===`directory:tree:-100001:2:3:${m.premise_id}:0`));
+  await h.cb(1,`directory:members:${m.premise_id}:0`);assert.match(h.calls.at(-1).text,/Person 2/);
   await h.cb(1,`directory:person:${m.id}`);assert.match(h.calls.at(-1).text,/Person 2/);assert.match(h.calls.at(-1).text,/Власник/);assert.match(h.calls.at(-1).text,/\+380671234567/);
   assert.equal(h.member(1,'95'),undefined);
   await h.cb(1,`unit:askremove:${m.id}:${m.version}`);assert.equal(h.member(2,'95').status,'approved');
@@ -704,12 +710,12 @@ test('admin directory opens other apartments, contacts and confirmed owner revoc
 test('directory protects foreign contacts, isolates houses, paginates and rejects disconnected records',async()=>{
  const h=harness(2);try{
   const a=await register(h,2);const b=await register(h,3,{number:'95',floor:'3',chat:-100002});
-  await h.msg(1,'👥 Мешканці будинку');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='directory:house:-100002:0'));
-  await h.cb(1,'directory:tree:-100001:1:2:0:0');let buttons=h.calls.at(-1).reply_markup.inline_keyboard.flat();assert.ok(buttons.some(x=>x.callback_data===`directory:tree:-100001:1:2:${a.premise_id}:0`));assert.ok(!buttons.some(x=>x.callback_data.includes(`:${b.premise_id}:0`)));
+  await h.msg(1,'👥 Мешканці будинку');assert.ok(directoryActions(h.calls.at(-1)).some(b=>b.callback_data==='directory:house:-100002:0'));
+  await h.cb(1,'directory:tree:-100001:1:2:0:0');let buttons=directoryActions(h.calls.at(-1));assert.ok(buttons.some(x=>x.callback_data===`directory:tree:-100001:1:2:${a.premise_id}:0`));assert.ok(!buttons.some(x=>x.callback_data.includes(`:${b.premise_id}:0`)));
   for(const uid of [2,3]){const before=h.calls.length;await h.cb(uid,`directory:person:${b.id}`);assert.equal(h.calls.slice(before).filter(c=>isSend(c.method)||c.method==='editMessageText').length,0);}
   const before=h.calls.length;await h.cb(1,`directory:person:${b.id}`,{message_id:1,chat:{id:-100002,type:'supergroup'}});assert.equal(h.calls.slice(before).filter(c=>isSend(c.method)||c.method==='editMessageText').length,0);
   for(let i=30;i<39;i++)await register(h,10+i,{number:String(i)});
-  await h.cb(1,'directory:tree:-100001:1:2:0:0');assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(x=>x.callback_data==='directory:tree:-100001:1:2:0:1'));
+  await h.cb(1,'directory:tree:-100001:1:2:0:0');assert.ok(directoryActions(h.calls.at(-1)).some(x=>x.callback_data==='directory:tree:-100001:1:2:0:1'));
   await h.cb(1,'directory:tree:-100001:1:2:0:1');assert.match(h.calls.at(-1).text,/Кв\./);
   h.sqlite.prepare("UPDATE groups SET status='disconnected' WHERE chat_id=-100002").run();
   await h.cb(1,`directory:person:${b.id}`);assert.equal(h.calls.at(-1).text,'Мешканець недоступний.');
@@ -1332,10 +1338,10 @@ test('resident tree expands in one message and displays roles, phones and Telegr
   h.calls.length=0;
   for(const data of ['directory:house:-100001:0','directory:tree:-100001:1:-:0:0','directory:tree:-100001:1:2:0:0',`directory:tree:-100001:1:2:${owner.premise_id}:0`])await h.cb(1,data,target);
   const edits=h.calls.filter(c=>c.method==='editMessageText');assert.equal(edits.length,4);assert.ok(edits.every(c=>c.message_id===555));assert.equal(h.calls.some(c=>isSend(c.method)),false);
-  const last=edits.at(-1);assert.match(last.text,/├──|└──/);assert.match(last.text,/Person 2 · @Oleksandr · Власник/);assert.match(last.text,/Person 3 · Член сім’ї/);assert.match(last.text,/📞 \+380671234567/);
-  assert.ok(last.reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`directory:person:${owner.id}`));
+  const last=edits.at(-1);assert.match(last.text,/├─|└─/);assert.match(last.text,/href="https:\/\/t.me\/Oleksandr">Person 2<\/a><br\/><code>[^\n]*<\/code>🔑 Власник<br\/><code>[^\n]*<\/code><a[^>]*>@Oleksandr/);assert.match(last.text,/href="tg:\/\/user\?id=3">Person 3<\/a><br\/><code>[^\n]*<\/code>👪 Член сім’ї/);assert.match(last.text,/📞 \+380671234567/);
+  assert.equal(directoryActions(last).some(b=>b.callback_data.startsWith('directory:person:')),false);
   await h.cb(1,`directory:person:${owner.id}`,target);assert.match(h.calls.at(-1).text,/@Oleksandr/);
-  assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`directory:tree:-100001:1:2:${owner.premise_id}:0`));
+  assert.ok(directoryActions(h.calls.at(-1)).some(b=>b.callback_data===`directory:tree:-100001:1:2:${owner.premise_id}:0`));
   await h.cb(1,'directory:tree:-100001:1:2:0:0',target);assert.doesNotMatch(h.calls.at(-1).text,/Person 2|380/);
  }finally{h.close();}
 });
@@ -1347,7 +1353,7 @@ test('resident tree supports commerce, missing legacy floors and resident pagina
   const other=await register(h,8,{number:'95',floor:'3',chat:-100002});
   await h.cb(1,'directory:tree:-100001:c:-:0:0');assert.match(h.calls.at(-1).text,/Кава &amp; &lt;чай&gt;/);
   await h.cb(1,`directory:tree:-100001:c:-:${shop.premise_id}:0`);let out=h.calls.at(-1);
-  assert.match(out.text,/Person 2/);assert.doesNotMatch(out.text,/Person 8/);assert.ok(out.reply_markup.inline_keyboard.flat().some(b=>b.callback_data===`directory:tree:-100001:c:-:${shop.premise_id}:1`));
+  assert.match(out.text,/Person 2/);assert.doesNotMatch(out.text,/Person 8/);assert.ok(directoryActions(out).some(b=>b.callback_data===`directory:tree:-100001:c:-:${shop.premise_id}:1`));
   await h.cb(1,`directory:tree:-100001:c:-:${shop.premise_id}:1`);out=h.calls.at(-1);assert.match(out.text,/Person 6|Person 7/);
   await h.cb(1,'directory:tree:-100001:1:-:0:0');assert.match(h.calls.at(-1).text,/Поверх не вказано/);
   await h.cb(1,`directory:tree:-100001:1:n:${legacy.premise_id}:0`);assert.match(h.calls.at(-1).text,/84А/);assert.match(h.calls.at(-1).text,/Person 3/);
@@ -1374,5 +1380,25 @@ test('Telegram username is captured on registration, follows changes and removal
   username='';await h.msg(2,'/id');assert.equal(profile().telegram_username,'');assert.equal(profile().name,name);assert.equal(profile().phone,phone);assert.equal(h.member(2,'25').id,m.id);
   // Ordinary group chatter does not trigger profile synchronization.
   username='group_name';await h.dispatch({message:{message_id:44,chat:{id:-100001,type:'supergroup'},from:{id:2},text:'привіт'}});assert.equal(profile().telegram_username,'');
+ }finally{h.close();}
+});
+
+test('resident tree uses native link-style callbacks in the text and toggles branches without a bottom keyboard',async()=>{
+ const h=harness();try{
+  const m=await register(h,2);
+  await h.msg(1,'👥 Мешканці будинку');let view=h.calls.at(-1);
+  assert.equal(view.method,'sendRichMessage');assert.equal(view.reply_markup,undefined);
+  assert.match(view.rich_message.html,/type="callback_data" style="link"/);
+  const target={message_id:777,chat:{id:1,type:'private'}};
+  await h.cb(1,'directory:tree:-100001:1:-:0:0',target);view=h.calls.at(-1);
+  assert.match(view.rich_message.html,/>▾ Під’їзд 1<\/tg-button>/);
+  assert.ok(directoryActions(view).some(b=>b.callback_data==='directory:tree:-100001:-:-:0:0'));
+  await h.cb(1,'directory:tree:-100001:1:2:0:0',target);
+  await h.cb(1,`directory:tree:-100001:1:2:${m.premise_id}:0`,target);view=h.calls.at(-1);
+  assert.deepEqual(view.reply_markup.inline_keyboard,[]);assert.equal(view.message_id,777);
+  assert.match(view.rich_message.html,/>▾ Кв\. 25<\/tg-button>/);
+  assert.doesNotMatch(view.rich_message.html,/Дії|directory:person:/);
+  assert.ok(directoryActions(view).every(b=>Buffer.byteLength(b.callback_data)<=64));
+  await h.cb(1,'directory:tree:-100001:1:2:0:0',target);assert.doesNotMatch(h.calls.at(-1).text,/Person 2|380/);
  }finally{h.close();}
 });

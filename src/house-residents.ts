@@ -2,8 +2,8 @@ import { residentTree, unitTree, unitState, treeData, parseTreeState } from './r
 import type { Button, Callback, Env } from './env.ts';
 import { answer, send, telegram } from './telegram.ts';
 import { connectedGroups, getGroup, isConnected } from './groups.ts';
-import { escapeHtml } from './presentation.ts';
-import { membershipSelect, premiseLabel, roleLabel } from './premises.ts';
+import { escapeHtml, telegramProfileLink } from './presentation.ts';
+import { membershipSelect, premiseLabel, roleLabel, roleIcon } from './premises.ts';
 import type { Membership } from './premises.ts';
 import { positiveId } from './validation.ts';
 
@@ -46,7 +46,8 @@ export async function directoryCallback(env:Env,q:Callback):Promise<boolean> {
     if(!m||!isConnected(await getGroup(env,m.chat_id))){await send(env,q.from.id,'Мешканець недоступний.');return true;}
     const buttons:Button[][]=m.user_id===q.from.id?[]:[[{text:'Вимкнути доступ',callback_data:`unit:askremove:${m.membership_id}:${m.version}`}]];
     buttons.push([{text:'← До приміщення',callback_data:treeData(unitState(m))}]);
-    await telegram(env,'editMessageText',{chat_id:q.from.id,message_id:q.message.message_id,parse_mode:'HTML',text:`<b>${escapeHtml(m.name)}</b>${m.telegram_username?` · @${escapeHtml(m.telegram_username)}`:''}\n${escapeHtml(premiseLabel(m))} · ${roleLabel(m.role)}\n📞 ${escapeHtml(m.phone)}${m.status==='pending'?'\n⏳ Заявка на перевірці':''}`,reply_markup:{inline_keyboard:buttons}});
+    const nick=m.telegram_username?`\n${telegramProfileLink(m.user_id,`@${m.telegram_username}`,m.telegram_username)}`:'';
+    await telegram(env,'editMessageText',{chat_id:q.from.id,message_id:q.message.message_id,parse_mode:'HTML',link_preview_options:{is_disabled:true},text:`👤 <b>${telegramProfileLink(m.user_id,m.name,m.telegram_username)}</b>\n${escapeHtml(premiseLabel(m))}\n${roleIcon(m.role)} ${roleLabel(m.role)}${nick}\n📞 ${escapeHtml(m.phone)}${m.status==='pending'?'\n⏳ Заявка на перевірці':''}`,reply_markup:{inline_keyboard:buttons}});
   }
   return true;
 }

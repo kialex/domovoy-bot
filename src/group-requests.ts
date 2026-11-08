@@ -100,7 +100,7 @@ export async function groupRequest(env:Env,m:Message){
     if(block)return reply(env,context,block);return;
   }
   const kind:PollRequestKind=decision?.kind||(/(?:статист|звіт|отч[её]т|результат)/iu.test(question)&&/(?:голос|опитув|опрос)/iu.test(question)?'report':'voters');
-  if(!decision&&!asksForVoters(question)&&kind!=='report')return reply(env,context,env.AI?'ШІ зараз недоступний. Спробуйте пізніше. Список голосів можна отримати запитом «хто голосував».':'Щоб побачити список, напишіть: «хто голосував».');
+  if(!decision&&!asksForVoters(question)&&kind!=='report')return reply(env,context,env.AI?'ШІ зараз недоступний. Спробуйте пізніше.':'Щоб побачити список, напишіть: «хто голосував».');
   if(decision?.title){
     const all=(await env.HOME_DB.prepare("SELECT id,question FROM polls WHERE chat_id=? AND status IN ('open','closed') ORDER BY created_at DESC,id DESC").bind(m.chat.id).all<Poll>()).results;
     const norm=(s:string)=>s.normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim();

@@ -6,7 +6,7 @@ import { answer, telegram } from './telegram.ts';
 
 interface Identity extends User {username:string}
 interface Poll {id:number;question:string}
-interface RequestContext {token:string;user_id:number;chat_id:number;group_version:number;message_id:number;thread_id:number|null}
+interface RequestContext {chat_id:number;message_id:number;thread_id:number|null}
 const identities=new WeakMap<Env,{bot:Identity;until:number}>();
 async function botIdentity(env:Env){
   const old=identities.get(env);if(old&&old.until>Date.now())return old.bot;
@@ -52,10 +52,10 @@ async function activePolls(env:Env,chat:number){return (await env.HOME_DB.prepar
 async function choose(env:Env,c:RequestContext,page=0){
   const polls=await activePolls(env,c.chat_id);
   if(!polls.length)return reply(env,c,'У групі немає активних голосувань.');
-  const buttons:Button[][]=polls.slice(page*8,page*8+8).map(p=>[{text:p.question.slice(0,60),callback_data:`gv:pick:${c.token}:${p.id}`}]);
+  const buttons:Button[][]=polls.slice(page*8,page*8+8).map(p=>[{text:p.question.slice(0,60),callback_data:`gv:pick:${p.id}`}]);
   const nav:Button[]=[];
-  if(page>0)nav.push({text:'← Назад',callback_data:`gv:page:${c.token}:${page-1}`});
-  if(polls.length>(page+1)*8)nav.push({text:'Далі →',callback_data:`gv:page:${c.token}:${page+1}`});
+  if(page>0)nav.push({text:'← Назад',callback_data:`gv:page:${page-1}`});
+  if(polls.length>(page+1)*8)nav.push({text:'Далі →',callback_data:`gv:page:${page+1}`});
   if(nav.length)buttons.push(nav);
   return reply(env,c,'За яким голосуванням показати список?',buttons);
 }
@@ -69,7 +69,7 @@ export async function groupRequest(env:Env,m:Message){
   const tagged=mentions.some(e=>m.text!.slice(e.offset,e.offset+e.length).toLowerCase()===`@${bot.username.toLowerCase()}`)||direct.some(e=>e.user?.id===bot.id);
   const replied=m.reply_to_message?.from?.id===bot.id;
   if(!tagged&&!replied)return;
-  const context:RequestContext={token:crypto.randomUUID().replace(/-/g,'').slice(0,12),user_id:m.from.id,chat_id:m.chat.id,group_version:group.version,message_id:m.message_id,thread_id:m.message_thread_id||null};
+  const context:RequestContext={chat_id:m.chat.id,message_id:m.message_id,thread_id:m.message_thread_id||null};
   if(!asksForVoters(m.text))return reply(env,context,'Щоб побачити список, напишіть: «хто голосував».');
   if(replied){
     const mid=m.reply_to_message!.message_id;
@@ -79,19 +79,16 @@ export async function groupRequest(env:Env,m:Message){
   const polls=await activePolls(env,m.chat.id);
   if(!polls.length)return reply(env,context,'У групі немає активних голосувань.');
   if(polls.length===1)return publicVoters(env,context,polls[0].id);
-  await env.HOME_DB.prepare('DELETE FROM group_vote_requests WHERE expires_at<=unixepoch()').run();
-  await env.HOME_DB.prepare('INSERT INTO group_vote_requests VALUES (?,?,?,?,?,?,unixepoch()+900)').bind(context.token,context.user_id,context.chat_id,context.group_version,context.message_id,context.thread_id).run();
   return choose(env,context);
 }
 export async function groupRequestCallback(env:Env,q:Callback){
   if(!q.data?.startsWith('gv:'))return false;
   await answer(env,q.id,'');
   if(!q.message||!['group','supergroup'].includes(q.message.chat.type))return true;
-  const [,action,token,value]=q.data.split(':');
-  if(!['page','pick'].includes(action)||!/^([a-f0-9]{12})$/.test(token||'')||!/^\d+$/.test(value||''))return true;
-  const c=await env.HOME_DB.prepare('SELECT * FROM group_vote_requests WHERE token=? AND user_id=? AND chat_id=? AND expires_at>unixepoch()').bind(token,q.from.id,q.message.chat.id).first<RequestContext>();
-  if(!c)return true;
-  const g=await getGroup(env,c.chat_id);if(!isConnected(g)||g.version!==c.group_version)return true;
+  const [,action,value,...extra]=q.data.split(':');
+  if(extra.length||!['page','pick'].includes(action)||!/^\d+$/.test(value||''))return true;
+  const c:RequestContext={chat_id:q.message.chat.id,message_id:q.message.message_id,thread_id:q.message.message_thread_id||null};
+  if(!isConnected(await getGroup(env,c.chat_id)))return true;
   if(action==='page'){
     const page=Number(value);const polls=await activePolls(env,c.chat_id);
     if(Number.isSafeInteger(page)&&page>=0&&page*8<polls.length)await choose(env,c,page);

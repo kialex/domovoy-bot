@@ -1194,22 +1194,22 @@ test('group voter requests require this bot mention or reply and publish premise
     assert.equal(h.calls.some(c=>isSend(c.method)),false);
   }finally{h.close();}
 });
-test('group voter selection is bound to requester and group; direct replies identify closed polls',async()=>{
+test('group voter selection is stateless, available to participants and scoped to its group',async()=>{
   const h=harness(2);try{
     await register(h,2);const first=await poll(h);await cast(h,2,first,0);const second=await poll(h);const other=await poll(h,-100002);
     h.calls.length=0;await askGroup(h,'дай список кто голосовал');
     const choice=h.calls.find(c=>isSend(c.method));assert.match(choice.text,/За яким голосуванням/);assert.equal(choice.reply_markup.inline_keyboard.length,2);
     const callback=choice.reply_markup.inline_keyboard[0][0].callback_data;
-    h.calls.length=0;await h.cb(3,callback,{message_id:123,chat:{id:-100001,type:'supergroup'}});assert.equal(h.calls.some(c=>isSend(c.method)),false);
-    await h.cb(2,callback,{message_id:123,chat:{id:-100002,type:'supergroup'}});assert.equal(h.calls.some(c=>isSend(c.method)),false);
-    const token=callback.split(':')[2];
-    await h.cb(2,`gv:pick:${token}:${other.id}`,{message_id:123,chat:{id:-100001,type:'supergroup'}});assert.equal(h.calls.some(c=>c.text?.includes('25')),false);
-    h.calls.length=0;await h.cb(2,`gv:pick:${token}:${first.id}`,{message_id:123,chat:{id:-100001,type:'supergroup'}});assert.ok(h.calls.some(c=>c.text?.includes('25')));
+    h.calls.length=0;await h.cb(3,callback,{message_id:123,chat:{id:-100001,type:'supergroup'}});assert.equal(h.calls.some(c=>isSend(c.method)),true);h.calls.length=0;
+    await h.cb(2,callback,{message_id:123,chat:{id:-100002,type:'supergroup'}});assert.equal(h.calls.some(c=>c.text?.includes('25')),false);h.calls.length=0;
+    await h.cb(2,`gv:pick:${other.id}`,{message_id:123,chat:{id:-100001,type:'supergroup'}});assert.equal(h.calls.some(c=>c.text?.includes('25')),false);
+    h.calls.length=0;await h.cb(2,`gv:pick:${first.id}`,{message_id:123,chat:{id:-100001,type:'supergroup'}});assert.ok(h.calls.some(c=>c.text?.includes('25')));
     await closePoll(h,first.id);first.message_id=h.sqlite.prepare('SELECT result_message_id FROM polls WHERE id=?').get(first.id).result_message_id;h.calls.length=0;
     await askGroup(h,'покажи список проголосовавших квартир',{tag:false,reply:{message_id:first.message_id,chat:{id:-100001,type:'supergroup'},from:{id:999,is_bot:true}}});
     assert.ok(h.calls.some(c=>c.text?.includes('25')));assert.equal(h.calls.some(c=>c.reply_markup?.inline_keyboard),false);
-    h.sqlite.prepare('UPDATE group_vote_requests SET expires_at=0').run();h.calls.length=0;
-    await h.cb(2,`gv:pick:${token}:${second.id}`,{message_id:123,chat:{id:-100001,type:'supergroup'}});assert.equal(h.calls.some(c=>isSend(c.method)),false);
+    assert.equal(h.sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='group_vote_requests'").get(),undefined);
+    h.sqlite.prepare("UPDATE groups SET status='disconnected' WHERE chat_id=-100001").run();h.calls.length=0;
+    await h.cb(2,`gv:pick:${second.id}`,{message_id:123,chat:{id:-100001,type:'supergroup'}});assert.equal(h.calls.some(c=>isSend(c.method)),false);
   }finally{h.close();}
 });
 test('group requests handle empty polls, disconnected groups and UTF-16 mention offsets',async()=>{

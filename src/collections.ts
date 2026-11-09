@@ -20,37 +20,37 @@ function button(text: string, callback_data: string): Button[] {
   return [{text, callback_data}];
 }
 
-const INPUT_URL = 'https://homebot.invalid/collection/';
-const INPUT_LIFETIME = 900;
-
-async function inputKey(env: Env) {
-  return crypto.subtle.importKey('raw',new TextEncoder().encode(env.TELEGRAM_WEBHOOK_SECRET),
-    {name:'HMAC',hash:'SHA-256'},false,['sign','verify']);
+interface CollectionInput {
+  step: InputStep;
+  target_id: number;
+  subject_id: number;
+  guided: boolean;
+  expires: number;
+  token: string;
 }
 
-async function askCollectionInput(env: Env, step: InputStep, target: number, text: string, subject = 0) {
-  const expires = Math.floor(Date.now()/1000)+INPUT_LIFETIME;
-  const payload = [step,target,subject,expires].join('/');
-  const signature = new Uint8Array(await crypto.subtle.sign('HMAC',await inputKey(env),
-    new TextEncoder().encode(INPUT_URL+payload)));
-  const hex = Array.from(signature,byte=>byte.toString(16).padStart(2,'0')).join('');
-  await telegram(env,'sendMessage',{
-    chat_id:env.ADMIN_TELEGRAM_USER_ID,text,
-    entities:[{type:'text_link',offset:0,length:text.length,url:INPUT_URL+payload+'/'+hex}],
-    link_preview_options:{is_disabled:true},
-    reply_markup:{force_reply:true},
-  });
+export async function clearCollectionInput(env: Env) {
+  await env.HOME_DB.prepare('UPDATE private_chats SET collection_input=NULL WHERE user_id=? AND collection_input IS NOT NULL')
+    .bind(env.ADMIN_TELEGRAM_USER_ID).run();
 }
 
-async function readCollectionInput(env: Env, url: string) {
-  const [step,target,subject,expires,signature,...extra]=url.slice(INPUT_URL.length).split('/');
-  if(extra.length||!['title','apartment','allocate','resident_amount','apartment_amount','description','requested','card','bank_url'].includes(step)||
-     !/^-?[1-9]\d*$/.test(target)||!/^\d+$/.test(subject)||!/^\d+$/.test(expires)||!/^[a-f0-9]{64}$/.test(signature))return null;
-  const deadline=Number(expires);
-  if(deadline<Math.floor(Date.now()/1000)||!Number.isSafeInteger(Number(target))||!Number.isSafeInteger(Number(subject)))return null;
-  const bytes=Uint8Array.from(signature.match(/../g)!,hex=>parseInt(hex,16));
-  const valid=await crypto.subtle.verify('HMAC',await inputKey(env),bytes,new TextEncoder().encode(url.slice(0,-65)));
-  return valid?{step:step as InputStep,target_id:Number(target),subject_id:Number(subject)}:null;
+async function askCollectionInput(env: Env, step: InputStep, target: number, text: string, subject = 0, guided = false) {
+  const token = crypto.randomUUID().slice(0,12);
+  const input: CollectionInput = {
+    step,target_id:target,subject_id:subject,guided,expires:Math.floor(Date.now()/1000)+900,token,
+  };
+  await env.HOME_DB.prepare('UPDATE private_chats SET collection_input=? WHERE user_id=?')
+    .bind(JSON.stringify(input),env.ADMIN_TELEGRAM_USER_ID).run();
+  const buttons: Button[][] = [];
+  if(guided && ['description','card','bank_url'].includes(step))buttons.push(button('Пропустити',`hc:skip:${token}`));
+  buttons.push(button('Скасувати',`hc:cancelinput:${token}`));
+  await send(env,env.ADMIN_TELEGRAM_USER_ID,text,buttons);
+}
+
+async function collectionInput(env: Env) {
+  const row = await env.HOME_DB.prepare('SELECT collection_input FROM private_chats WHERE user_id=?')
+    .bind(env.ADMIN_TELEGRAM_USER_ID).first<{collection_input:string|null}>();
+  return row?.collection_input ? {raw:row.collection_input,input:JSON.parse(row.collection_input) as CollectionInput} : null;
 }
 
 function findCollection(env: Env, id: number) {
@@ -62,11 +62,11 @@ export async function collectionsMenu(env: Env, page = 0) {
   const {results} = await env.HOME_DB.prepare(`SELECT c.* FROM house_collections c JOIN groups g ON g.chat_id=c.chat_id
     WHERE g.status='approved' AND g.bot_present=1 ORDER BY c.closed,c.id DESC LIMIT ? OFFSET ?`)
     .bind(PAGE_SIZE+1,page*PAGE_SIZE).all<Collection>();
-  const buttons = results.slice(0,PAGE_SIZE).map(c=>button((c.closed?'🏁 ':'')+c.title,`hc:view:${c.id}`));
+  const buttons = [button('➕ Створити збір','hc:new'), ...results.slice(0,PAGE_SIZE).map(c=>
+    button((c.closed?'🏁 ':c.message_id?'':'📝 ')+c.title,`hc:view:${c.id}`))];
   if(page>0)buttons.push(button('← Назад',`hc:list:${page-1}`));
   if(results.length>PAGE_SIZE)buttons.push(button('Далі →',`hc:list:${page+1}`));
-  buttons.push(button('➕ Створити збір','hc:new'));
-  await send(env,env.ADMIN_TELEGRAM_USER_ID,'Збори будинку',buttons);
+  await send(env,env.ADMIN_TELEGRAM_USER_ID,results.length?'Оберіть збір або створіть новий.':'Зборів ще немає.',buttons);
 }
 
 async function collectionCard(env: Env, collection: Collection, page = 0) {
@@ -78,29 +78,21 @@ async function collectionCard(env: Env, collection: Collection, page = 0) {
     `${escapeHtml(row.name || row.business_name || 'Кв. '+row.number)} — ${money(row.amount)}`);
   const buttons: Button[][] = [];
   if(!collection.closed) {
-    buttons.push(button('Опис збору',`hc:description:${collection.id}`));
-    buttons.push(button('Внесок з квартири',`hc:requested:${collection.id}`));
-    if(collection.mono_fund_id)buttons.push(
-      button('Посилання на банку',`hc:bank_url:${collection.id}`),
-      button('Номер картки банки',`hc:card:${collection.id}`));
-
-    buttons.push(button(collection.message_id?'Налаштувати підняття':'📣 Опублікувати в чаті',`hc:publish:${collection.id}`));
-    if(collection.message_id)buttons.push(button('Підняти в чаті',`hc:raise:${collection.id}`));
+    buttons.push(button(collection.message_id?'Підняти в чаті':'Переглянути й опублікувати',
+      `hc:${collection.message_id?'raise':'publish'}:${collection.id}`));
     buttons.push(button('Додати внесок',`hc:add:${collection.id}`));
-    buttons.push(button('Прив’язати банку',`hc:banks:${collection.id}`));
-    buttons.push(button('Завершити збір',`hc:finish:${collection.id}`));
+    buttons.push(button('Налаштування збору',`hc:settings:${collection.id}`));
   }
-  const {total,goal,url}=await collectionProgress(env,collection);
+  const {total,goal}=await collectionProgress(env,collection);
   const progress=money(total)+(goal>0?' із '+money(goal):'');
-  if(url&&!collection.closed)buttons.push([{text:'Поповнити банку',url}]);
-  if(collection.mono_fund_id||await env.HOME_DB.prepare(
+  const pending = collection.mono_fund_id || await env.HOME_DB.prepare(
     'SELECT 1 FROM mono_operations WHERE collection_id=? AND credited_premise_id IS NULL LIMIT 1'
-  ).bind(collection.id).first())buttons.push(button('Нерозподілені внески',`hc:unmatched:${collection.id}`));
-  if(collection.mono_fund_id)buttons.push(button('Перенести внесок на мешканця',`hc:transfers:${collection.id}`));
+  ).bind(collection.id).first();
+  if(pending)buttons.push(button('Внески з банки',`hc:bankpayments:${collection.id}`));
   if(page>0)buttons.push(button('← Назад',`hc:view:${collection.id}:${page-1}`));
   if(results.length>PAGE_SIZE)buttons.push(button('Далі →',`hc:view:${collection.id}:${page+1}`));
   await sendHtml(env,env.ADMIN_TELEGRAM_USER_ID,
-    `💰 <b>${escapeHtml(collection.title)}</b>${collection.closed?' · Завершено':''}\nЗібрано — <b>${progress}</b>${rows.length?'\n\n'+rows.join('\n'):''}`,buttons);
+    `💰 <b>${escapeHtml(collection.title)}</b>${collection.closed?' · Завершено':collection.message_id?' · Опубліковано':' · Чернетка'}\nЗібрано — <b>${progress}</b>${rows.length?'\n\n'+rows.join('\n'):''}`,buttons);
 }
 
 export async function collectionCallback(env: Env, q: Callback) {
@@ -114,20 +106,56 @@ export async function collectionCallback(env: Env, q: Callback) {
     return true;
   }
   if(action==='new') {
+    await clearCollectionInput(env);
     const groups=await connectedGroups(env);
-    await send(env,q.from.id,'Оберіть будинок для збору.',groups.map(g=>button(g.title.slice(0,60),`hc:house:${g.chat_id}`)));
+    if(groups.length===1) {
+      await askCollectionInput(env,'title',groups[0].chat_id,'Напишіть назву збору.',0,true);
+    } else {
+      await send(env,q.from.id,groups.length?'У якому чаті буде збір?':'Спочатку підключіть групу.',
+        groups.map(g=>button(g.title.slice(0,60),`hc:house:${g.chat_id}`)));
+    }
     return true;
   }
   if(action==='house') {
     const chat=groupId(raw);
-    if(chat&&isConnected(await getGroup(env,chat))) {
-      await askCollectionInput(env,'title',chat,'Напишіть назву збору.');
+    if(chat&&isConnected(await getGroup(env,chat)))await askCollectionInput(env,'title',chat,'Напишіть назву збору.',0,true);
+    return true;
+  }
+  if(action==='skip'||action==='cancelinput') {
+    const pending = await collectionInput(env);
+    if(pending?.input.token!==raw)return true;
+    if(action==='cancelinput') {
+      await clearCollectionInput(env);
+      const collection = pending.input.step==='title'?null:await findCollection(env,pending.input.target_id);
+      if(collection)await collectionCard(env,collection);
+      else await send(env,q.from.id,'Створення збору скасовано.');
+    } else if(pending.input.guided && ['description','card','bank_url'].includes(pending.input.step)) {
+      await handleCollectionInput(env,q.from.id,pending,'—',0);
     }
     return true;
   }
+  await clearCollectionInput(env);
   const id=positiveId(raw);
   const collection=id&&await findCollection(env,id);
   if(!collection)return true;
+  if(action==='settings'&&!collection.closed) {
+    await send(env,q.from.id,`Налаштування «${collection.title}»`,[
+      button('Змінити опис',`hc:description:${id}`),button('Змінити внесок з квартири',`hc:requested:${id}`),
+      button('Обрати банку',`hc:banks:${id}`),
+      ...(collection.mono_fund_id?[button('Посилання на банку',`hc:bank_url:${id}`),button('Номер картки банки',`hc:card:${id}`)]:[]),
+      ...(collection.message_id?[button('Частота підняття',`hc:publish:${id}`)]:[]),
+      button('Завершити збір',`hc:finish:${id}`),button('До збору',`hc:view:${id}`),
+    ]);
+    return true;
+  }
+  if(action==='bankpayments') {
+    await send(env,q.from.id,'Внески з банки',[
+      button('Зарахувати нерозподілений внесок',`hc:unmatched:${id}`),
+      button('Перенести внесок на мешканця',`hc:transfers:${id}`),
+      button('До збору',`hc:view:${id}`),
+    ]);
+    return true;
+  }
   if(action==='view'&&Number.isSafeInteger(page)&&page>=0&&page<=10000) {
     await collectionCard(env,collection,page);
   }
@@ -151,23 +179,33 @@ export async function collectionCallback(env: Env, q: Callback) {
     await askCollectionInput(env,action,collection.id,prompts[action]);
   }
   if(action==='publish') {
-    await send(env,q.from.id,'Як часто піднімати збір?',
-      REPOST_INTERVALS.map(interval=>button(intervalLabel(interval),`hc:interval:${collection.id}:${interval}`)));
+    if(collection.requested_amount===null) {
+      await askCollectionInput(env,'requested',collection.id,'Скільки має внести одна квартира? Напишіть суму в гривнях.',0,true);
+    } else await chooseCollectionInterval(env,collection);
   }
   if(action==='interval'&&/^\d+$/.test(extra||'')&&validInterval(page)) {
     const group=await getGroup(env,collection.chat_id);
     await telegram(env,'sendMessage',{chat_id:q.from.id,...collectionPostFormat,text:`Чат: <b>${escapeHtml(group?.title||'')}</b>\n${intervalLabel(page)}\n\n${await publicCollectionText(env,collection)}`,
-      reply_markup:{inline_keyboard:[button(collection.message_id?'Зберегти інтервал':'Опублікувати',`hc:confirm:${collection.id}:${page}`)]}});
+      reply_markup:{inline_keyboard:[button(collection.message_id?'Зберегти інтервал':'Опублікувати',`hc:${collection.message_id?'saveinterval':'confirm'}:${collection.id}:${page}`),button('Змінити частоту',`hc:publish:${collection.id}`),button('До збору',`hc:view:${collection.id}`)]}});
   }
-  if(action==='confirm'&&/^\d+$/.test(extra||'')&&validInterval(page)) {
+  if((action==='confirm'||action==='saveinterval')&&/^\d+$/.test(extra||'')&&validInterval(page)) {
     if(collection.requested_amount===null) {
       await send(env,q.from.id,'Спочатку вкажіть внесок з квартири.',[button('Вказати внесок',`hc:requested:${collection.id}`)]);
-    } else if(collection.message_id) {
+    } else if(action==='saveinterval'&&collection.message_id) {
       await env.HOME_DB.prepare(`UPDATE house_collections SET repost_interval=?,next_repost_at=CASE WHEN ?>0 THEN unixepoch()+? END
         WHERE id=? AND closed=0`).bind(page,page,page,collection.id).run();
       await send(env,q.from.id,'Інтервал збережено.');
-    } else {
-      await send(env,q.from.id,await publishCollection(env,collection,page)?'Збір опубліковано.':'Публікація вже виконується або збір недоступний.');
+    } else if(action==='confirm'&&!collection.message_id) {
+      let published: boolean;
+      try { published = await publishCollection(env,collection,page); }
+      catch {
+        await send(env,q.from.id,'Не вдалося опублікувати. Перевірте, чи бот може писати в чат.',[
+          button('Спробувати ще раз',`hc:confirm:${collection.id}:${page}`),button('До збору',`hc:view:${collection.id}`),
+        ]);
+        return true;
+      }
+      if(published)await send(env,q.from.id,'Збір опубліковано.',[button('До збору',`hc:view:${collection.id}`)]);
+      else await send(env,q.from.id,'Збір уже опубліковано або він недоступний.',[button('До збору',`hc:view:${collection.id}`)]);
     }
   }
   if(action==='raise'&&collection.message_id) {
@@ -195,22 +233,46 @@ export async function collectionCallback(env: Env, q: Callback) {
     if(collection.message_id)await refreshCollectionPost(env,{...collection,closed:1,published_hash:null}).catch(()=>{});
     await collectionCard(env,{...collection,closed:1});
   }
-  if(action==='banks') {
-    const {results}=await env.HOME_DB.prepare(`SELECT f.id,f.title FROM mono_funds f WHERE f.chat_id=? AND f.active=1
-      AND NOT EXISTS (SELECT 1 FROM house_collections c WHERE c.mono_fund_id=f.id AND c.id!=?) ORDER BY f.title`)
-      .bind(collection.chat_id,collection.id).all<{id:string;title:string}>();
-    await send(env,q.from.id,results.length?'Оберіть банку для збору.':'Для цього будинку немає вільних підключених банок.',
-      results.map(f=>button(f.title.slice(0,60),`hc:link:${collection.id}:${f.id}`)));
-  }
+  if(action==='banks')await chooseCollectionBank(env,collection);
   if(action==='link'&&extra) {
     const changed=await env.HOME_DB.prepare(`UPDATE house_collections SET bank_linked_at=CASE WHEN mono_fund_id=? THEN bank_linked_at ELSE unixepoch() END,
       bank_card=CASE WHEN mono_fund_id=? THEN bank_card END, bank_url=CASE WHEN mono_fund_id=? THEN bank_url END, mono_fund_id=? WHERE id=? AND closed=0
       AND EXISTS (SELECT 1 FROM mono_funds WHERE id=? AND chat_id=house_collections.chat_id AND active=1)
       AND NOT EXISTS (SELECT 1 FROM house_collections WHERE mono_fund_id=? AND id!=?)`)
       .bind(extra,extra,extra,extra,collection.id,extra,extra,collection.id).run();
-    if(changed.meta.changes)await send(env,q.from.id,'Банку прив’язано. Нові внески з номером квартири в коментарі зараховуватимуться автоматично.');
+    const guided=q.data.endsWith(':setup');
+    const saved=changed.meta.changes&&await findCollection(env,collection.id);
+    if(!saved) {
+      await send(env,q.from.id,'Ця банка вже недоступна.');
+      await chooseCollectionBank(env,collection,guided);
+    } else if(guided) {
+      if((await collectionProgress(env,saved)).url)await askCollectionCardNumber(env,saved);
+      else await askCollectionInput(env,'bank_url',saved.id,'Надішліть посилання на банку.',0,true);
+    } else await collectionCard(env,saved);
   }
   return true;
+}
+
+async function chooseCollectionBank(env: Env, collection: Collection, guided = false) {
+  const {results} = await env.HOME_DB.prepare(`SELECT f.id,f.title FROM mono_funds f WHERE f.chat_id=? AND f.active=1
+    AND NOT EXISTS (SELECT 1 FROM house_collections c WHERE c.mono_fund_id=f.id AND c.id!=?) ORDER BY f.title`)
+    .bind(collection.chat_id,collection.id).all<{id:string;title:string}>();
+  if(guided && !results.length)return chooseCollectionInterval(env,collection);
+  const buttons = results.map(f=>button(f.title.slice(0,60),`hc:link:${collection.id}:${f.id}${guided?':setup':''}`));
+  buttons.push(guided?button(collection.mono_fund_id?'Далі з поточною банкою':'Далі без банки',`hc:publish:${collection.id}`)
+    :button('До збору',`hc:view:${collection.id}`));
+  await send(env,env.ADMIN_TELEGRAM_USER_ID,results.length?'Яку банку прив’язати до збору?':'Для цього будинку немає підключених банок.',buttons);
+}
+
+function askCollectionCardNumber(env: Env, collection: Collection) {
+  return askCollectionInput(env,'card',collection.id,'Напишіть 16 цифр картки банки.',0,true);
+}
+
+function chooseCollectionInterval(env: Env, collection: Collection) {
+  return send(env,env.ADMIN_TELEGRAM_USER_ID,'Як часто піднімати допис у чаті?',[
+    ...REPOST_INTERVALS.map(interval=>button(intervalLabel(interval),`hc:interval:${collection.id}:${interval}`)),
+    button('До збору',`hc:view:${collection.id}`),
+  ]);
 }
 
 async function transferAction(env: Env, collection: Collection, action: string, raw?: string, selected?: string) {
@@ -395,19 +457,23 @@ function amountInKopiykas(text: string) {
 
 export async function collectionMessage(env: Env, message: Message, updateId: number) {
   if(message.chat.type!=='private'||String(message.from?.id)!==env.ADMIN_TELEGRAM_USER_ID||!message.text)return false;
-  const uid=message.from!.id;
-  const reply=message.reply_to_message;
-  const url=reply?.from?.is_bot&&reply.entities?.find(entity=>entity.type==='text_link'&&entity.url?.startsWith(INPUT_URL))?.url;
-  if(!url)return false;
-  const current=await readCollectionInput(env,url);
-  if(!current) {
-    await send(env,uid,'Цей запит застарів. Відкрийте збір і повторіть дію.');
+  const pending=await collectionInput(env);
+  if(!pending)return false;
+  return handleCollectionInput(env,message.from!.id,pending,message.text.trim(),updateId);
+}
+
+async function handleCollectionInput(env: Env, uid: number, pending: {raw:string;input:CollectionInput}, value: string, updateId: number) {
+  const {raw,input:current}=pending;
+  const claimed=await env.HOME_DB.prepare('UPDATE private_chats SET collection_input=NULL WHERE user_id=? AND collection_input=?')
+    .bind(uid,raw).run();
+  if(!claimed.meta.changes)return true;
+  if(current.expires<Math.floor(Date.now()/1000)) {
+    await send(env,uid,'Час минув. Відкрийте збір і повторіть дію.');
     return true;
   }
-  const value=message.text.trim();
   if(current.step==='title') {
     if(!value||value.length>80||value.includes('\n')) {
-      await askCollectionInput(env,'title',current.target_id,'Напишіть назву збору до 80 символів.');
+      await askCollectionInput(env,'title',current.target_id,'Напишіть назву збору до 80 символів.',0,current.guided);
       return true;
     }
     if(!isConnected(await getGroup(env,current.target_id))) {
@@ -419,7 +485,7 @@ export async function collectionMessage(env: Env, message: Message, updateId: nu
       env.HOME_DB.prepare("UPDATE updates SET state='done' WHERE id=?").bind(updateId),
     ]);
     const collection=await findCollection(env,Number(result[0].meta.last_row_id));
-    if(collection)await collectionCard(env,collection);
+    if(collection)await askCollectionInput(env,'description',collection.id,'Коротко опишіть, на що збираємо.',0,true);
     return true;
   }
   const collection=await findCollection(env,current.target_id);
@@ -431,16 +497,21 @@ export async function collectionMessage(env: Env, message: Message, updateId: nu
     const step=current.step;
     const column={description:'description',requested:'requested_amount',card:'bank_card',bank_url:'bank_url'}[step];
     const card=value.replace(/\s/g,'');
-    const updated=step==='description'?(value==='—'?'':value):step==='requested'?amountInKopiykas(value):step==='bank_url'?value:value==='—'?null:card;
+    const updated=step==='description'?(value==='—'?'':value):step==='requested'?amountInKopiykas(value):step==='bank_url'?(value==='—'?null:value):value==='—'?null:card;
     if((step==='description'&&value.length>1000)||(step==='requested'&&updated===null)||
        (step==='card'&&(!collection.mono_fund_id||(updated!==null&&!/^\d{16}$/.test(card))))||
-       (step==='bank_url'&&(!collection.mono_fund_id||!/^https:\/\/send\.monobank\.ua\/jar\/[a-zA-Z0-9_-]{1,80}$/.test(value)))) {
-      await askCollectionInput(env,step,collection.id,'Перевірте формат і спробуйте ще раз.');
+       (step==='bank_url'&&(!collection.mono_fund_id||(updated!==null&&!/^https:\/\/send\.monobank\.ua\/jar\/[a-zA-Z0-9_-]{1,80}$/.test(value))))) {
+      await askCollectionInput(env,step,collection.id,{description:'Опис має бути до 1000 символів.',requested:'Напишіть суму в гривнях, наприклад 2400.',card:'Напишіть 16 цифр картки.',bank_url:'Надішліть посилання у форматі https://send.monobank.ua/jar/…'}[step],0,current.guided);
       return true;
     }
     await env.HOME_DB.prepare(`UPDATE house_collections SET ${column}=? WHERE id=? AND closed=0`).bind(updated,collection.id).run();
     const saved=await findCollection(env,collection.id);
-    if(saved)await collectionCard(env,saved);
+    if(!saved)return true;
+    if(!current.guided)await collectionCard(env,saved);
+    else if(step==='description')await askCollectionInput(env,'requested',saved.id,'Скільки має внести одна квартира? Напишіть суму в гривнях.',0,true);
+    else if(step==='requested')await chooseCollectionBank(env,saved,true);
+    else if(step==='bank_url')await askCollectionCardNumber(env,saved);
+    else await chooseCollectionInterval(env,saved);
     return true;
   }
   if(current.step==='apartment'||current.step==='allocate') {
@@ -453,7 +524,7 @@ export async function collectionMessage(env: Env, message: Message, updateId: nu
     }
     if(current.step==='allocate') {
       await allocateBankContribution(env,collection.id,current.subject_id!,premise.id);
-        await collectionCard(env,collection);
+      await collectionCard(env,collection);
       return true;
     }
     const {results}=await env.HOME_DB.prepare(`SELECT u.id,u.name FROM memberships m JOIN profiles u ON u.id=m.profile_id
@@ -501,14 +572,29 @@ async function unmatched(env: Env, collection: Collection, page: number) {
   await send(env,env.ADMIN_TELEGRAM_USER_ID,results.length?'Оберіть внесок, щоб зарахувати його квартирі.':'Нерозподілених внесків немає.',buttons);
 }
 
+async function sendApartmentReceipt(env: Env, operationId: number) {
+  const {results: residents} = await env.HOME_DB.prepare(`SELECT DISTINCT u.user_id,c.title,p.number,o.amount
+    FROM mono_operations o JOIN house_collections c ON c.id=o.collection_id
+    JOIN premises p ON p.id=o.credited_premise_id AND p.chat_id=c.chat_id
+    JOIN memberships m ON m.premise_id=p.id JOIN profiles u ON u.id=m.profile_id
+    WHERE o.rowid=? AND m.status='approved' AND u.user_id>0`)
+    .bind(operationId).all<{user_id:number;title:string;number:string;amount:number}>();
+  for(const resident of residents) {
+    const amount = new Intl.NumberFormat('uk-UA', {maximumFractionDigits: 2}).format(resident.amount / 100);
+    const text = `Дякуємо за участь у зборі!\nНа збір «${escapeHtml(resident.title)}» зараховано <b>${amount} ₴</b> від квартири <b>${escapeHtml(resident.number)}</b>.`;
+    await sendHtml(env,resident.user_id,text).catch(()=>{});
+  }
+}
+
 async function allocateBankContribution(env: Env, collectionId: number, operationId: number, premiseId: number) {
-  await env.HOME_DB.batch([
+  const [,credited] = await env.HOME_DB.batch([
     env.HOME_DB.prepare(`INSERT INTO collection_totals(collection_id,premise_id,amount)
       SELECT collection_id,?,amount FROM mono_operations WHERE rowid=? AND collection_id=? AND credited_premise_id IS NULL AND amount>0
       ON CONFLICT(collection_id,premise_id) DO UPDATE SET amount=amount+excluded.amount`).bind(premiseId,operationId,collectionId),
     env.HOME_DB.prepare(`UPDATE mono_operations SET credited_premise_id=?
       WHERE rowid=? AND collection_id=? AND credited_premise_id IS NULL AND amount>0`).bind(premiseId,operationId,collectionId),
   ]);
+  if(credited.meta.changes)await sendApartmentReceipt(env,operationId).catch(()=>{});
 }
 
 export async function residentCollectionLines(env: Env, uid: number) {
@@ -531,7 +617,7 @@ export async function residentCollectionLines(env: Env, uid: number) {
   }).join('\n');
 }
 
-export function bankContributionStatements(env: Env, fundId: string, operation: {
+export async function recordBankContribution(env: Env, fundId: string, operation: {
   id: string; time: number; amount: number; comment?: string;
 }, notification?: {legacy:string;heading:string}) {
   const comment=typeof operation.comment==='string'?operation.comment.replace(/\s+/g,' ').trim().slice(0,300):'';
@@ -550,17 +636,24 @@ export function bankContributionStatements(env: Env, fundId: string, operation: 
     WHERE f.id=? AND NOT EXISTS (SELECT 1 FROM mono_operations WHERE fund_id=f.id AND operation_id=?)
     ON CONFLICT(fund_id,event_key) DO NOTHING`)
     .bind('op:'+operation.id,notification.legacy,notification.heading,operation.time,operation.amount,number,fundId,operation.id));
-  if(number&&operation.amount>0)statements.push(env.HOME_DB.prepare(`INSERT INTO collection_totals(collection_id,premise_id,amount)
-    SELECT c.id,p.id,? FROM mono_funds f JOIN house_collections c ON ${link}
-    JOIN premises p ON p.chat_id=c.chat_id AND p.kind='apartment' AND p.number=?
-    WHERE f.id=? AND NOT EXISTS (SELECT 1 FROM mono_operations WHERE fund_id=f.id AND operation_id=?)
-    ON CONFLICT(collection_id,premise_id) DO UPDATE SET amount=amount+excluded.amount`)
-    .bind(operation.amount,operation.time,operation.amount,number,fundId,operation.id));
+  if(number&&operation.amount>0) {
+    const match = `FROM mono_funds f JOIN house_collections c ON ${link}
+      JOIN premises p ON p.chat_id=c.chat_id AND p.kind='apartment' AND p.number=?
+      WHERE f.id=? AND NOT EXISTS (SELECT 1 FROM mono_operations WHERE fund_id=f.id AND operation_id=?)`;
+    const values = [operation.time,operation.amount,number,fundId,operation.id];
+    statements.push(env.HOME_DB.prepare(`INSERT INTO collection_totals(collection_id,premise_id,amount)
+      SELECT c.id,p.id,? ${match}
+      ON CONFLICT(collection_id,premise_id) DO UPDATE SET amount=amount+excluded.amount`)
+      .bind(operation.amount,...values));
+  }
   statements.push(env.HOME_DB.prepare(`INSERT INTO mono_operations(fund_id,operation_id,time,amount,collection_id,credited_premise_id,collection_comment)
     SELECT f.id,?,?,?,c.id,p.id,CASE WHEN c.id IS NOT NULL THEN ? END
     FROM mono_funds f LEFT JOIN house_collections c ON ${link}
     LEFT JOIN premises p ON p.chat_id=c.chat_id AND p.kind='apartment' AND p.number=?
     WHERE f.id=? ON CONFLICT(fund_id,operation_id) DO NOTHING`)
     .bind(operation.id,operation.time,operation.amount,comment||null,operation.time,operation.amount,number,fundId));
-  return statements;
+  const inserted = (await env.HOME_DB.batch(statements)).at(-1);
+  if(number && operation.amount>0 && inserted?.meta.changes && inserted.meta.last_row_id) {
+    await sendApartmentReceipt(env,inserted.meta.last_row_id).catch(()=>{});
+  }
 }

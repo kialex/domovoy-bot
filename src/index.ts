@@ -1,5 +1,5 @@
 import { groupRequest, groupRequestCallback } from './group-requests.ts';
-import { COLLECTIONS, collectionCallback, collectionMessage, collectionsMenu, scheduledCollections } from './collections.ts';
+import { COLLECTIONS, clearCollectionInput, collectionCallback, collectionMessage, collectionsMenu, scheduledCollections } from './collections.ts';
 import { FUNDS, fundsMenu, startMono, monoMessage, monoCallback, scheduledMono, clearMonoSetup } from './monobank.ts';
 import { retryGroupWelcomes } from './group-welcome.ts';
 import { joinRequest, joinCallback, retryJoins } from './join-requests.ts';
@@ -23,9 +23,13 @@ async function message(env: Env, m: Message, updateId: number) {
   if (command === '/start' && args[0]?.startsWith('vote_')) return openVoteIntent(env, m.from.id, args[0].slice(5));
   if (command === '/id') return send(env, m.chat.id, `Ваш Telegram ID: ${m.from.id}`);
   const admin = String(m.from.id) === env.ADMIN_TELEGRAM_USER_ID;
+  if (admin && (command.startsWith('/') || [...Object.values(ADMIN_ACTIONS),...Object.values(RESIDENT_ACTIONS),
+    COLLECTIONS,FUNDS,'💰 Збори коштів',HOUSE_RESIDENTS,'➕ Додати збір','🗳 Активні голосування','🏁 Завершені голосування'].some(action=>action===text))) {
+    await clearCollectionInput(env);
+  }
   if (admin && (command === '/menu' || text === ADMIN_ACTIONS.menu)) {await clearMonoSetup(env);return adminMenu(env);}
   if (admin && text === COLLECTIONS) {await clearMonoSetup(env);return collectionsMenu(env);}
-  if (admin && text === FUNDS) return fundsMenu(env);
+  if (admin && (text === FUNDS || text === '💰 Збори коштів')) return fundsMenu(env);
   if (admin && text === '➕ Додати збір') return startMono(env);
   if (admin && (text === ADMIN_ACTIONS.polls || command === '/polls')) return adminPollList(env);
   if (admin && text === '🗳 Активні голосування') return adminPollList(env,0,'open');
@@ -72,7 +76,7 @@ export async function handleUpdate(env: Env, update: Update) {
   const privateMessage=update.message||update.callback_query?.message;
   const sender=update.message?.from||update.callback_query?.from;
   if(privateMessage?.chat.type==='private'&&sender&&!sender.is_bot){
-    await env.HOME_DB.prepare('INSERT INTO private_chats VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id').bind(sender.id,privateMessage.chat.id).run();
+    await env.HOME_DB.prepare('INSERT INTO private_chats(user_id,chat_id) VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id').bind(sender.id,privateMessage.chat.id).run();
     // Telegram's join-request private chat identifier may differ from the user ID.
     // Route by authenticated sender; outbound messages use the stored chat identifier.
     privateMessage.chat={...privateMessage.chat,id:sender.id};

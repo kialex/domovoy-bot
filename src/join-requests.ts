@@ -53,7 +53,7 @@ export async function joinRequest(env:Env,r:ChatJoinRequest,updateId:number) {
  await env.HOME_DB.prepare(`INSERT INTO join_requests(chat_id,user_id,token,request_date,update_id,welcomed) VALUES (?,?,?,?,?,0) ON CONFLICT(chat_id,user_id) DO UPDATE SET token=excluded.token,request_date=excluded.request_date,update_id=excluded.update_id,status='pending',decision='',attempts=0,notified=0,welcomed=0,welcome_attempts=0,welcome_lease_until=NULL WHERE excluded.update_id>join_requests.update_id`).bind(r.chat.id,r.from.id,key,r.date,updateId).run();
  const row=await env.HOME_DB.prepare('SELECT * FROM join_requests WHERE chat_id=? AND user_id=?').bind(r.chat.id,r.from.id).first<{token:string;update_id:number;notified:number;status:string}>();
  if(!row||row.update_id!==updateId||row.status!=='pending')return;
- await env.HOME_DB.prepare('INSERT INTO private_chats VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id').bind(r.from.id,r.user_chat_id).run();
+ await env.HOME_DB.prepare('INSERT INTO private_chats(user_id,chat_id) VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id').bind(r.from.id,r.user_chat_id).run();
  if(await registered(env,r.from.id,r.chat.id)){await resolveJoin(env,r.from.id,r.chat.id,true);return;}
  if(row.notified)return;
  try{

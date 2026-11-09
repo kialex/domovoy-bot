@@ -6,7 +6,7 @@ import worker from '../src/index.ts';
 import { apartmentNumber, parsePoll, ukrainianPhone } from '../src/validation.ts';
 import { entranceForApartment, commercialKey, validFloor } from '../src/premises.ts';
 import { pollCard } from '../src/presentation.ts';
-import { bankContributionStatements, scheduledCollections } from '../src/collections.ts';
+import { recordBankContribution, scheduledCollections } from '../src/collections.ts';
 
 const isSend=method=>['sendMessage','sendRichMessage'].includes(method);
 
@@ -94,13 +94,9 @@ test('collection contributions accumulate once per resident and are visible only
   try{
     const member=await register(h,2);
     await register(h,3);
-    const reply=async(text)=>{
-      const prompt=h.calls.at(-1);
-      assert.equal(prompt.reply_markup.force_reply,true);
-      await h.dispatch({message:{message_id:1,chat:{id:1,type:'private'},from:{id:1},text,
-        reply_to_message:{message_id:2,chat:{id:1,type:'private'},from:{id:999,is_bot:true},text:prompt.text,entities:prompt.entities}}});
-    };
+    const reply=text=>h.msg(1,text);
     await h.cb(1,'hc:house:-100001');
+    assert.equal(h.calls.at(-1).reply_markup.force_reply,undefined);
     await reply('Генератор');
     const {id}=h.sqlite.prepare('SELECT id FROM house_collections').get();
     for(const amount of ['1000','500,50']){
@@ -127,13 +123,18 @@ test('bank contributions credit only the matching apartment and keep unresolved 
   try{
     const member=await register(h,2,{number:'84А'});
     await register(h,3,{number:'84А',chat:-100002});
+    await register(h,4,{number:'84А',role:'tenant'});
+    await register(h,5,{number:'84А',approve:false});
     h.sqlite.exec(`INSERT INTO mono_connections(id,token_fingerprint,token_cipher,jars) VALUES ('c','fp','cipher','[]');
       INSERT INTO mono_funds(id,connection_id,jar_id,chat_id,group_version,title,balance,deposits,daily,goal_notice,started_at,checked_at)
         VALUES ('f','c','j',-100001,1,'Jar',0,1,0,0,0,0);
       INSERT INTO house_collections(id,chat_id,title,mono_fund_id,bank_linked_at) VALUES (1,-100001,'Генератор','f',100);`);
-    const apply=(id,comment,time=101)=>h.env.HOME_DB.batch(bankContributionStatements(h.env,'f',{id,time,amount:150000,comment},{
+    const apply=(id,comment,time=101)=>recordBankContribution(h.env,'f',{id,time,amount:150000,comment},{
       legacy:'Старий формат',heading:'Поповнення\n',
-    }));
+    });
+    const beforeDelivery=h.calls.length;
+    h.apiOverride=(method,body)=>isSend(method)&&body.chat_id===4
+      ? Response.json({ok:false},{status:503}) : null;
     await apply('old','кв. 84А',99);
     await apply('one','кв. 84a');
     await apply('one','кв. 84a');
@@ -146,6 +147,14 @@ test('bank contributions credit only the matching apartment and keep unresolved 
     assert.equal(notice('old'),'Старий формат');
     assert.match(notice('one'),/Внесок зараховано квартирі <b>84А<\/b> автоматично/);
     assert.equal(notice('two'),'Поповнення\nГенератор\nДякуємо за внесок!');
+    const receipts=h.calls.slice(beforeDelivery).filter(call=>call.text?.startsWith('Дякуємо за участь у зборі!'));
+    assert.deepEqual(receipts.map(call=>call.chat_id).sort(),[2,4]);
+    assert.match(receipts[0].text,/«Генератор» зараховано <b>1\s500 ₴<\/b> від квартири <b>84А<\/b>/);
+
+    h.apiOverride=null;
+    await h.msg(4,'👤 Мої дані');
+    assert.match(h.calls.at(-1).text,/Генератор — <b>1\s500 грн \(внесок квартири\)/);
+
     const {id}=h.sqlite.prepare("SELECT rowid AS id FROM mono_operations WHERE operation_id='one'").get();
     await h.cb(1,`hc:move:1:${id}:${member.profile_id}`);
     await h.cb(1,`hc:move:1:${id}:${member.profile_id}`);
@@ -162,14 +171,36 @@ test('public collection uses bank progress, edits it in place and replaces the p
     h.sqlite.exec(`INSERT INTO mono_connections(id,token_fingerprint,token_cipher,jars) VALUES ('c','fp','cipher','[]');
       INSERT INTO mono_funds(id,connection_id,jar_id,chat_id,group_version,title,balance,goal,deposits,daily,goal_notice,started_at,checked_at)
         VALUES ('f','c','j',-100001,1,'Jar',3240000,15000000,1,0,0,0,0);
-      INSERT INTO house_collections(id,chat_id,title,description,requested_amount,mono_fund_id,bank_url,bank_card)
-        VALUES (1,-100001,'Генератор','Резервне живлення',240000,'f','https://send.monobank.ua/jar/demo','1111222233334444');`);
+    `);
     const publicCalls=()=>h.calls.filter(call=>call.chat_id===-100001);
     const saved=()=>h.sqlite.prepare('SELECT * FROM house_collections WHERE id=1').get();
+    const press=async(label)=>{
+      const found=h.calls.at(-1).reply_markup.inline_keyboard.flat().find(item=>item.text===label);
+      assert.ok(found,label);
+      await h.cb(1,found.callback_data);
+    };
+    await h.msg(1,'💰 Збори');
+    await press('➕ Створити збір');
+    await h.msg(1,'Генератор');
+    await h.msg(1,'Резервне живлення');
+    await h.msg(1,'невірна сума');
+    assert.match(h.calls.at(-1).text,/2400/);
+    await h.msg(1,'2400');
+    await press('Jar');
+    await h.msg(1,'https://send.monobank.ua/jar/demo');
+    await h.msg(1,'1111222233334444');
+    await press('Щогодини');
+    assert.match(h.calls.at(-1).text,/Резервне живлення/);
     await h.cb(2,'hc:confirm:1:3600');
-    await h.cb(1,'hc:interval:1:3600');
     assert.equal(publicCalls().length,0);
-    await h.cb(1,'hc:confirm:1:3600');
+    await h.cb(1,'hc:interval:1:3600');
+    h.apiOverride=(method,body)=>method==='sendMessage'&&body.chat_id===-100001
+      ? Response.json({ok:false},{status:403}) : null;
+    await press('Опублікувати');
+    assert.equal(saved().message_id,null);
+    assert.match(h.calls.at(-1).text,/Не вдалося опублікувати/);
+    h.apiOverride=null;
+    await press('Спробувати ще раз');
     const first=saved().message_id;
     const post=publicCalls().at(-1);
     assert.match(post.text,/32\s400 грн/);

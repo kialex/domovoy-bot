@@ -1,10 +1,10 @@
 import type { Button, Callback, Env, Message } from './env.ts';
-import { bankContributionStatements } from './collections.ts';
+import { recordBankContribution } from './collections.ts';
 import { connectedGroups, getGroup, isConnected } from './groups.ts';
 import { escapeHtml } from './presentation.ts';
 import { answer, send, sendHtml, telegram } from './telegram.ts';
 
-export const FUNDS='💰 Збори коштів';
+export const FUNDS='🫙 Банки monobank';
 const now=()=>Math.floor(Date.now()/1000);
 const id=()=>crypto.randomUUID().replace(/-/g,'').slice(0,12);
 const money=(n:number)=>new Intl.NumberFormat('uk-UA',{maximumFractionDigits:2}).format(n/100)+' ₴';
@@ -125,7 +125,7 @@ export async function monoCallback(env:Env,q:Callback){
     return true;
   }
   let s=await setupFor(env,nonce);
-  if(!s){await send(env,q.from.id,'Цей крок застарів. Відкрийте «Збори коштів» знову.');return true;}
+  if(!s){await send(env,q.from.id,'Цей крок застарів. Відкрийте «Банки monobank» знову.');return true;}
   if(action==='cancel'){await clearMonoSetup(env);return true;}
   if(action==='confirmdelete'&&s.step==='delete'){
     await env.HOME_DB.batch([
@@ -180,12 +180,10 @@ export async function scheduledMono(env:Env){
       for(const o of ops){
         if(o.hold||o.time<f.started_at)continue;
         // Persist transaction and its notification together, so retries cannot lose an event.
-        await env.HOME_DB.batch([
-          ...bankContributionStatements(env,f.id,o,f.deposits&&o.amount>0?{
+        await recordBankContribution(env,f.id,o,f.deposits&&o.amount>0?{
             legacy:depositText(f.title,o.amount,o.balance,f.goal,o.comment),
             heading:`💸 <b>+${money(o.amount)} у банку</b>\n`,
-          }:undefined),
-        ]);
+          }:undefined);
       }
       const latest=ops.filter(o=>!o.hold&&o.time>=f.started_at).at(-1);const balance=latest?.balance??f.balance;
       await env.HOME_DB.prepare("UPDATE mono_funds SET balance=?,checked_at=?,error='' WHERE id=?").bind(balance,end,f.id).run();

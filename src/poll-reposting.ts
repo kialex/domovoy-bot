@@ -78,7 +78,7 @@ export async function raisePoll(env:Env,id:number,requestKey:string,scheduledDue
   try{
     const p=await env.HOME_DB.prepare('SELECT * FROM polls WHERE id=? AND repost_lease=?').bind(id,lease).first<RepostPoll>();
     if(!p||p.status!=='open'||(p.ends_at!==null&&p.ends_at<=Math.floor(Date.now()/1000))||!p.message_id)return 'unavailable';
-    const view=await livePollView(env,p);
+    const view=await livePollView(env,p,true);
     // Publish first. Votes belong to the poll, never to its Telegram message.
     const fresh=await sendPollView(env,p.chat_id,view);
     const result=await env.HOME_DB.batch([

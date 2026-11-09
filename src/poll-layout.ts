@@ -2,6 +2,7 @@ import { escapeHtml, kyivDate } from './presentation.ts';
 export interface PollLayout {
  title:string;description?:string;options:string[];counts:number[];
  votedPremises?:string[];endsAt?:number|null;closedAt?:number|null;closed?:boolean;now?:number;
+ reposted?:boolean;
  pollId?:number;previewUrl?:string;previewNote?:string;daysRemaining?:number;
 }
 export const voteWord=(n:number)=>n%100>=11&&n%100<=14?'голосів':n%10===1?'голос':n%10>=2&&n%10<=4?'голоси':'голосів';
@@ -24,5 +25,13 @@ export function richPollCard(data:PollLayout){
  else if(data.daysRemaining!==undefined)time=`⏳ Залишилось: ${data.daysRemaining} дн.`;
  let outcome='';
  if(data.closed){const best=Math.max(0,...data.counts);const leaders=data.options.filter((_,i)=>(data.counts[i]||0)===best);outcome=total===0?'Голосів не подано.':leaders.length===1?`Найбільше голосів — «${escapeHtml(leaders[0])}».`:`Однакова кількість голосів: ${leaders.map(v=>`«${escapeHtml(v)}»`).join(', ')}.`;}
- return {html:`<h2>${data.closed?'Підсумки голосування: ':''}${escapeHtml(data.title)}</h2>${summary}<hr/>${data.description?`<p>${escapeHtml(data.description).replace(/\n/g,'<br/>')}</p>`:''}${options}<p>${time}</p>${outcome?`<p><b>${outcome}</b></p>`:''}${data.previewNote?`<footer>${escapeHtml(data.previewNote)}</footer>`:''}`};
+ const secondsLeft=data.endsAt ? data.endsAt-now : null;
+ let reminder='';
+ if(data.reposted&&!data.closed&&(secondsLeft===null||secondsLeft>0)){
+  const message=secondsLeft!==null&&secondsLeft<=86400
+   ? 'Голосування скоро завершиться. Якщо ще не проголосували, встигніть долучитися.'
+   : 'Сусіди, якщо ще не встигли проголосувати, долучайтеся. Кожен голос важливий для спільного рішення.';
+  reminder=`<p>🔔 ${message}</p>`;
+ }
+ return {html:`<h2>${data.closed?'Підсумки голосування: ':''}${escapeHtml(data.title)}</h2>${data.closed?'':`<p><b>${time}</b></p>`}${reminder}${summary}<hr/>${data.description?`<p>${escapeHtml(data.description).replace(/\n/g,'<br/>')}</p>`:''}${options}${data.closed?`<p>${time}</p>`:''}${outcome?`<p><b>${outcome}</b></p>`:''}${data.previewNote?`<footer>${escapeHtml(data.previewNote)}</footer>`:''}`};
 }

@@ -136,7 +136,7 @@ test('collection contributions accumulate once per resident and are visible only
     assert.equal(totals.length,1);
     assert.equal(totals[0].amount,150050);
     await h.msg(2,'👤 Мої дані');
-    assert.match(h.calls.at(-1).text,/Генератор — <b>1\s500,5 грн<\/b>/);
+    assert.match(h.calls.at(-1).text,/Генератор\n<b>1\s500,5 грн<\/b>/);
     await h.msg(3,'👤 Мої дані');
     assert.doesNotMatch(h.calls.at(-1).text,/Генератор/);
     await h.cb(3,'hc:house:-100001');
@@ -214,7 +214,7 @@ test('bank contributions credit only the matching apartment and keep unresolved 
 
     h.apiOverride=null;
     await h.msg(4,'👤 Мої дані');
-    assert.match(h.calls.at(-1).text,/Генератор — <b>1\s500 грн \(внесок квартири\)/);
+    assert.match(h.calls.at(-1).text,/Квартира 84А<\/b>[\s\S]*Внески квартири 84А:<\/b>\n\nГенератор\n<b>1\s500 грн<\/b>/);
 
     const {id}=h.sqlite.prepare("SELECT rowid AS id FROM mono_operations WHERE operation_id='one'").get();
     await h.cb(1,`hc:move:1:${id}:${member.profile_id}`);
@@ -495,7 +495,12 @@ test('admin and resident keyboards route actions without poll/registration input
     await h.msg(1,'🗳 Створити голосування');const token=h.sqlite.prepare('SELECT token FROM poll_drafts').get().token;
     await h.msg(1,'🗳 Створити голосування');assert.equal(h.sqlite.prepare('SELECT token FROM poll_drafts').get().token,token);
     await h.msg(1,'/cancel');
-    await register(h,1);await h.msg(1,'👤 Мої дані');assert.match(h.calls.at(-1).text,/Person 1/);
+    await register(h,1);
+    const beforeData=h.calls.length;
+    await h.msg(1,'👤 Мої дані');
+    const dataMessages=h.calls.slice(beforeData).filter(c=>c.method==='sendMessage');
+    assert.match(dataMessages[0].text,/Person 1/);
+    assert.match(dataMessages[1].text,/Квартира 25/);
     await register(h,2);await h.msg(2,'/start');assert.ok(h.calls.at(-1).reply_markup.keyboard);
     await h.msg(2,'🏠 Мої приміщення');assert.match(h.calls.at(-1).text,/Мої приміщення/);
     await h.msg(2,'➕ Додати приміщення');assert.equal(h.form(2).step,'kind');
@@ -983,9 +988,9 @@ test('directory protects foreign contacts, isolates houses, paginates and reject
   await h.cb(1,'directory:tree:-100001:1:2:0:0');let buttons=directoryActions(h.calls.at(-1));assert.ok(buttons.some(x=>x.callback_data===`directory:tree:-100001:1:2:${a.premise_id}:0`));assert.ok(!buttons.some(x=>x.callback_data.includes(`:${b.premise_id}:0`)));
   for(const uid of [2,3]){const before=h.calls.length;await h.cb(uid,`directory:person:${b.id}`);assert.equal(h.calls.slice(before).filter(c=>isSend(c.method)||c.method==='editMessageText').length,0);}
   const before=h.calls.length;await h.cb(1,`directory:person:${b.id}`,{message_id:1,chat:{id:-100002,type:'supergroup'}});assert.equal(h.calls.slice(before).filter(c=>isSend(c.method)||c.method==='editMessageText').length,0);
-  for(let i=30;i<39;i++)await register(h,10+i,{number:String(i)});
+  for(let i=30;i<40;i++)await register(h,10+i,{number:String(i)});
   await h.cb(1,'directory:tree:-100001:1:2:0:0');assert.ok(directoryActions(h.calls.at(-1)).some(x=>x.callback_data==='directory:tree:-100001:1:2:0:1'));
-  await h.cb(1,'directory:tree:-100001:1:2:0:1');assert.match(h.calls.at(-1).text,/Кв\./);
+  await h.cb(1,'directory:tree:-100001:1:2:0:1');assert.match(h.calls.at(-1).text,/Кв\. 39/);
   h.sqlite.prepare("UPDATE groups SET status='disconnected' WHERE chat_id=-100002").run();
   await h.cb(1,`directory:person:${b.id}`);assert.equal(h.calls.at(-1).text,'Мешканець недоступний.');
  }finally{h.close();}

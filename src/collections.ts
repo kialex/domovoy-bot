@@ -664,9 +664,7 @@ async function allocateBankContribution(env: Env, collectionId: number, operatio
 }
 
 export async function residentCollectionLines(env: Env, uid: number) {
-  const {results}=await env.HOME_DB.prepare(`SELECT c.title,t.collection_id,
-      SUM(CASE WHEN t.profile_id IS NOT NULL THEN t.amount ELSE 0 END) AS personal,
-      SUM(CASE WHEN t.premise_id IS NOT NULL THEN t.amount ELSE 0 END) AS apartment
+  const {results}=await env.HOME_DB.prepare(`SELECT c.title,t.premise_id,t.amount
     FROM collection_totals t JOIN house_collections c ON c.id=t.collection_id
     JOIN groups g ON g.chat_id=c.chat_id
     WHERE g.status='approved' AND g.bot_present=1
@@ -674,13 +672,14 @@ export async function residentCollectionLines(env: Env, uid: number) {
         JOIN profiles u ON u.id=m.profile_id
         WHERE u.user_id=? AND m.status='approved' AND p.chat_id=c.chat_id
           AND (t.profile_id=m.profile_id OR t.premise_id=p.id))
-    GROUP BY c.id ORDER BY c.closed,c.id DESC LIMIT 20`).bind(uid)
-    .all<{title:string;personal:number;apartment:number}>();
-  return results.map(row=>{
-    const personal=row.personal?money(row.personal):'';
-    const apartment=row.apartment?money(row.apartment)+' (внесок квартири)':'';
-    return `${escapeHtml(row.title)} — <b>${[personal,apartment].filter(Boolean).join(' · ')}</b>`;
-  }).join('\n');
+    ORDER BY c.closed,c.id DESC`).bind(uid).all<{title:string;premise_id:number|null;amount:number}>();
+  const lines = new Map<number|null,string[]>();
+  for(const row of results) {
+    const entries = lines.get(row.premise_id) ?? [];
+    entries.push(`\n${escapeHtml(row.title)}\n<b>${money(row.amount)}</b>`);
+    lines.set(row.premise_id, entries);
+  }
+  return lines;
 }
 
 export async function recordBankContribution(env: Env, fundId: string, operation: {

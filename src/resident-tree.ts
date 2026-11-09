@@ -7,7 +7,7 @@ import { telegram } from './telegram.ts';
 
 interface TreeUnit extends Premise {member_count:number}
 export interface TreeState {chat:number;entrance:string;floor:string;unit:number;page:number;collection?:number}
-const ROOT='-';const UNKNOWN='n';const UNITS_PER_PAGE=6;const PEOPLE_PER_PAGE=3;
+const ROOT='-';const UNKNOWN='n';const APARTMENTS_PER_PAGE=10;const COMMERCIAL_PER_PAGE=6;const PEOPLE_PER_PAGE=3;
 const clean=(text:string,max=120)=>text.replace(/\s+/g,' ').trim().slice(0,max);
 export const treeData=(s:TreeState)=>`directory:tree:${s.chat}:${s.entrance}:${s.floor}:${s.unit}:${s.page}${s.collection?':'+s.collection:''}`;
 export const unitState=(p:Premise,page=0):TreeState=>({chat:p.chat_id,entrance:p.kind==='commercial'?'c':p.entrance===null?UNKNOWN:String(p.entrance),floor:p.kind==='commercial'?ROOT:p.floor===null?UNKNOWN:String(p.floor),unit:p.id,page});
@@ -46,8 +46,9 @@ export async function residentTree(env:Env,s:TreeState,messageId?:number){
   if(s.entrance!=='c'&&s.floor!==ROOT&&!levelUnits.length)return show(env,'Поверх уже недоступний.',[[{text:'До під’їзду',callback_data:treeData({...s,floor:ROOT,unit:0,page:0})}]],messageId);
   const selected=s.unit?levelUnits.find(p=>p.id===s.unit):undefined;
   if(s.unit&&!selected)return show(env,'Приміщення недоступне.',[],messageId);
-  const unitPage=selected?Math.floor(levelUnits.indexOf(selected)/UNITS_PER_PAGE):Math.min(s.page,Math.max(0,Math.ceil(levelUnits.length/UNITS_PER_PAGE)-1));
-  const visibleUnits=levelUnits.slice(unitPage*UNITS_PER_PAGE,(unitPage+1)*UNITS_PER_PAGE);
+  const unitsPerPage=s.entrance==='c'?COMMERCIAL_PER_PAGE:APARTMENTS_PER_PAGE;
+  const unitPage=selected?Math.floor(levelUnits.indexOf(selected)/unitsPerPage):Math.min(s.page,Math.max(0,Math.ceil(levelUnits.length/unitsPerPage)-1));
+  const visibleUnits=levelUnits.slice(unitPage*unitsPerPage,(unitPage+1)*unitsPerPage);
   const peoplePage=selected?Math.min(s.page,Math.max(0,Math.ceil(selected.member_count/PEOPLE_PER_PAGE)-1)):0;
   const people=selected?(await env.HOME_DB.prepare(`SELECT m.*,u.name,u.phone,u.telegram_username FROM memberships m JOIN profiles u ON u.id=m.profile_id WHERE m.premise_id=? AND m.status IN ('approved','pending') ORDER BY u.name,m.id LIMIT ? OFFSET ?`).bind(selected.id,PEOPLE_PER_PAGE+1,peoplePage*PEOPLE_PER_PAGE).all<Membership>()).results:[];
   const contributions=selected?(await env.HOME_DB.prepare(`SELECT c.title,t.amount
@@ -64,6 +65,7 @@ export async function residentTree(env:Env,s:TreeState,messageId?:number){
     people.slice(0,PEOPLE_PER_PAGE).forEach((m,i)=>{
       const last=i===Math.min(people.length,PEOPLE_PER_PAGE)-1;
       const details=prefix+(last?'   ':'│  ');
+      if(i>0)line(prefix+'│  ','');
       line(prefix+(last?'└─ ':'├─ '),`👤 ${m.user_id?telegramProfileLink(m.user_id,clean(m.name,100),m.telegram_username):escapeHtml(clean(m.name,100))}`);
       line(details,`${roleIcon(m.role)} ${roleLabel(m.role)}${m.status==='pending'?' · ⏳ Заявка':''}`);
       if(m.telegram_username)line(details,telegramProfileLink(m.user_id,`@${m.telegram_username}`,m.telegram_username));
@@ -96,7 +98,7 @@ export async function residentTree(env:Env,s:TreeState,messageId?:number){
         line(details,action('＋ Зарахувати внесок',target));
       }
     });
-    if(levelUnits.length>(unitPage+1)*UNITS_PER_PAGE)line(prefix,branchAction('Наступні приміщення →',{...base,page:unitPage+1}));
+    if(levelUnits.length>(unitPage+1)*unitsPerPage)line(prefix,branchAction('Наступні приміщення →',{...base,page:unitPage+1}));
   };
   branches.forEach((branch,i)=>{
     const last=i===branches.length-1;const prefix=last?'   ':'│  ';const open=branch===s.entrance;

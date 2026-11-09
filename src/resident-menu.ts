@@ -2,7 +2,7 @@ import type { Button, Callback, Env } from './env.ts';
 import { answer, send, sendHtml, telegram } from './telegram.ts';
 import { escapeHtml } from './presentation.ts';
 import { getGroup, isConnected } from './groups.ts';
-import { membershipSelect, ownMemberships, premiseLabel, roleLabel } from './premises.ts';
+import { membershipSelect, ownMemberships, premiseLabel, roleIcon, roleLabel } from './premises.ts';
 import type { Membership } from './premises.ts';
 import { positiveId } from './validation.ts';
 import { startRegistration } from './registration.ts';
@@ -24,7 +24,45 @@ export async function showOwnData(env: Env, uid: number) {
   if (!profile) return send(env,uid,'👤 Даних ще немає\nНатисніть «Додати приміщення», щоб пройти реєстрацію.');
   const own = await ownMemberships(env,uid);
   const contributions = await residentCollectionLines(env,uid);
-  return sendHtml(env,uid,`👤 <b>Мої дані</b>\n\nІм’я: ${escapeHtml(profile.name)}\nТелефон: ${escapeHtml(profile.phone)}\n\nПриміщень у підключених групах: <b>${own.length}</b>\nІм’я й телефон є спільними для ваших заявок. Роль і доступ перевіряються окремо для кожного приміщення.${contributions?'\n\n'+contributions:''}`);
+  const profileLines = [`👤 <b>Мої дані</b>\n\n${escapeHtml(profile.name)}\n📞 ${escapeHtml(profile.phone)}`];
+  const apartmentCounts = new Map<string,number>();
+  for(const unit of own) {
+    if(unit.kind==='apartment')apartmentCounts.set(unit.number, (apartmentCounts.get(unit.number) ?? 0) + 1);
+  }
+  if(!own.length)profileLines.push('', 'Ви ще не додали приміщення.');
+  await sendHtml(env,uid,profileLines.join('\n'));
+  const sendCard = async (heading: string, lines: string[]) => {
+    let message = heading;
+    for(const line of lines) {
+      if(message.length + line.length + 1 > 3900) {
+        await sendHtml(env,uid,message.trimEnd());
+        message = heading;
+      }
+      message += `\n${line}`;
+    }
+    await sendHtml(env,uid,message.trimEnd());
+  };
+  for(const unit of own) {
+    let title = unit.kind==='apartment' ? `🏠 ${premiseLabel(unit)}` : premiseLabel(unit);
+    if(unit.kind==='apartment' && (apartmentCounts.get(unit.number) ?? 0)>1 && unit.group_title) {
+      title = `🏘 ${unit.group_title}, ${premiseLabel(unit)}`;
+    }
+    const lines = ['', `${roleIcon(unit.role)} ${roleLabel(unit.role)}`];
+    if(unit.kind==='apartment') {
+      const entrance = unit.entrance===null ? 'Під’їзд не вказано' : `Під’їзд ${unit.entrance}`;
+      const floor = unit.floor===null ? 'Поверх не вказано' : `${unit.floor}-й поверх`;
+      lines.push(`${entrance} · ${floor}`);
+    }
+    if(unit.status==='pending')lines.push(statusLabel.pending);
+    const unitContributions = contributions.get(unit.id);
+    if(unit.status==='approved' && unitContributions?.length) {
+      const label = unit.kind==='apartment' ? `Внески квартири ${unit.number}:` : 'Внески:';
+      lines.push('', `💰 <b>${escapeHtml(label)}</b>`, ...unitContributions);
+    }
+    await sendCard(`<b>${escapeHtml(title)}</b>`, lines);
+  }
+  const personal = contributions.get(null);
+  if(personal?.length)await sendCard('💰 <b>Особисті внески:</b>', personal);
 }
 export async function showOwnUnits(env: Env,uid:number,page=0) {
   const rows = await ownMemberships(env,uid);

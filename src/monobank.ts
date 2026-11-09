@@ -1,4 +1,5 @@
 import type { Button, Callback, Env, Message } from './env.ts';
+import { bankContributionStatements } from './collections.ts';
 import { connectedGroups, getGroup, isConnected } from './groups.ts';
 import { escapeHtml } from './presentation.ts';
 import { answer, send, sendHtml, telegram } from './telegram.ts';
@@ -7,7 +8,7 @@ export const FUNDS='💰 Збори коштів';
 const now=()=>Math.floor(Date.now()/1000);
 const id=()=>crypto.randomUUID().replace(/-/g,'').slice(0,12);
 const money=(n:number)=>new Intl.NumberFormat('uk-UA',{maximumFractionDigits:2}).format(n/100)+' ₴';
-interface Jar {id:string;title:string;balance:number;goal?:number;currencyCode:number}
+interface Jar {id:string;title:string;balance:number;goal?:number;currencyCode:number;sendId?:string}
 interface Setup {nonce:string;step:string;connection_id:string|null;jar_id:string|null;chat_id:number|null;deposits:number;daily:number;goal_notice:number;expires_at:number}
 interface Connection {id:string;token_cipher:string;jars:string;last_request_at:number}
 interface Fund {id:string;connection_id:string;jar_id:string;chat_id:number;group_version:number;title:string;balance:number;goal:number;active:number;deposits:number;daily:number;goal_notice:number;started_at:number;checked_at:number;goal_sent:number;error:string}
@@ -80,7 +81,7 @@ export async function monoMessage(env:Env,m:Message){
     const data=await api<{jars:Jar[]}>(token,'client-info');
     if(!Array.isArray(data.jars))throw new Error('Invalid jars');
     jars=data.jars.filter(j=>j.currencyCode===980&&typeof j.id==='string'&&typeof j.title==='string'&&Number.isSafeInteger(j.balance)&&(j.goal===undefined||Number.isSafeInteger(j.goal)));
-    jars=jars.map(j=>({id:j.id,title:j.title.slice(0,150),balance:j.balance,goal:j.goal,currencyCode:j.currencyCode}));
+    jars=jars.map(j=>({id:j.id,title:j.title.slice(0,150),balance:j.balance,goal:j.goal,currencyCode:j.currencyCode,sendId:j.sendId}));
   }catch{await send(env,m.from.id,'Не вдалося підключитися. Перевірте токен або спробуйте через хвилину.');return true;}
   if(!jars.length){await send(env,m.from.id,'Не знайдено гривневих банок. Створіть банку в monobank і спробуйте ще раз.');return true;}
   const fingerprint=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token))),b=>b.toString(16).padStart(2,'0')).join('');
@@ -180,8 +181,10 @@ export async function scheduledMono(env:Env){
         if(o.hold||o.time<f.started_at)continue;
         // Persist transaction and its notification together, so retries cannot lose an event.
         await env.HOME_DB.batch([
-          env.HOME_DB.prepare(`INSERT INTO mono_outbox(fund_id,event_key,text) SELECT ?,?,? WHERE ?>0 AND ?=1 AND NOT EXISTS (SELECT 1 FROM mono_operations WHERE fund_id=? AND operation_id=?) ON CONFLICT(fund_id,event_key) DO NOTHING`).bind(f.id,'op:'+o.id,depositText(f.title,o.amount,o.balance,f.goal,o.comment),o.amount,f.deposits,f.id,o.id),
-          env.HOME_DB.prepare('INSERT INTO mono_operations VALUES (?,?,?,?) ON CONFLICT DO NOTHING').bind(f.id,o.id,o.time,o.amount),
+          ...bankContributionStatements(env,f.id,o,f.deposits&&o.amount>0?{
+            legacy:depositText(f.title,o.amount,o.balance,f.goal,o.comment),
+            heading:`💸 <b>+${money(o.amount)} у банку</b>\n`,
+          }:undefined),
         ]);
       }
       const latest=ops.filter(o=>!o.hold&&o.time>=f.started_at).at(-1);const balance=latest?.balance??f.balance;

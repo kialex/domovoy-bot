@@ -1,4 +1,5 @@
 import { groupRequest, groupRequestCallback } from './group-requests.ts';
+import { COLLECTIONS, collectionCallback, collectionMessage, collectionsMenu, scheduledCollections } from './collections.ts';
 import { FUNDS, fundsMenu, startMono, monoMessage, monoCallback, scheduledMono, clearMonoSetup } from './monobank.ts';
 import { retryGroupWelcomes } from './group-welcome.ts';
 import { joinRequest, joinCallback, retryJoins } from './join-requests.ts';
@@ -23,6 +24,7 @@ async function message(env: Env, m: Message, updateId: number) {
   if (command === '/id') return send(env, m.chat.id, `Ваш Telegram ID: ${m.from.id}`);
   const admin = String(m.from.id) === env.ADMIN_TELEGRAM_USER_ID;
   if (admin && (command === '/menu' || text === ADMIN_ACTIONS.menu)) {await clearMonoSetup(env);return adminMenu(env);}
+  if (admin && text === COLLECTIONS) {await clearMonoSetup(env);return collectionsMenu(env);}
   if (admin && text === FUNDS) return fundsMenu(env);
   if (admin && text === '➕ Додати збір') return startMono(env);
   if (admin && (text === ADMIN_ACTIONS.polls || command === '/polls')) return adminPollList(env);
@@ -59,6 +61,7 @@ async function message(env: Env, m: Message, updateId: number) {
     return id ? pollControls(env,id) : adminPollList(env);
   }
   if (command === '/help') return admin ? adminMenu(env) : residentMenu(env,m.from.id);
+  if (await collectionMessage(env,m,updateId)) return;
   if (await monoMessage(env,m)) return;
   const registration = await env.HOME_DB.prepare('SELECT user_id FROM sessions WHERE user_id=?').bind(m.from.id).first();
   if (registration) return registrationMessage(env, m);
@@ -81,6 +84,7 @@ export async function handleUpdate(env: Env, update: Update) {
     if (q.from.is_bot) return;
     if (await groupRequestCallback(env,q)) return;
     if (await monoCallback(env,q)) return;
+    if (await collectionCallback(env,q)) return;
     if (await joinCallback(env,q)) return;
     if (await directoryCallback(env,q)) return;
     if (await pollControlCallback(env,q,update.update_id)) return;
@@ -98,6 +102,7 @@ export default {
     await retryJoins(env);
     await retryGroupWelcomes(env);
     await scheduledMono(env);
+    await scheduledCollections(env);
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const path = new URL(request.url).pathname;

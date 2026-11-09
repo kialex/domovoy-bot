@@ -12,7 +12,7 @@ export interface Message {
   chat: { id: number; type: string };
   from?: User;
   text?: string;
-  entities?: {type:string;offset:number;length:number;user?:User}[];
+  entities?: {type:string;offset:number;length:number;user?:User;url?:string}[];
   reply_to_message?: Message;
   message_thread_id?: number;
 }

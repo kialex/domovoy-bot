@@ -6,6 +6,7 @@ import { membershipSelect, ownMemberships, premiseLabel, roleLabel } from './pre
 import type { Membership } from './premises.ts';
 import { positiveId } from './validation.ts';
 import { startRegistration } from './registration.ts';
+import { residentCollectionLines } from './collections.ts';
 
 export const RESIDENT_ACTIONS = {
   data: '👤 Мої дані', units: '🏠 Мої приміщення', polls: '🗳 Доступні голосування', add: '➕ Додати приміщення', menu: '🏠 Меню жителя',
@@ -22,7 +23,8 @@ export async function showOwnData(env: Env, uid: number) {
   const profile = await env.HOME_DB.prepare('SELECT name,phone FROM profiles WHERE user_id=?').bind(uid).first<{name:string;phone:string}>();
   if (!profile) return send(env,uid,'👤 Даних ще немає\nНатисніть «Додати приміщення», щоб пройти реєстрацію.');
   const own = await ownMemberships(env,uid);
-  return sendHtml(env,uid,`👤 <b>Мої дані</b>\n\nІм’я: ${escapeHtml(profile.name)}\nТелефон: ${escapeHtml(profile.phone)}\n\nПриміщень у підключених групах: <b>${own.length}</b>\nІм’я й телефон є спільними для ваших заявок. Роль і доступ перевіряються окремо для кожного приміщення.`);
+  const contributions = await residentCollectionLines(env,uid);
+  return sendHtml(env,uid,`👤 <b>Мої дані</b>\n\nІм’я: ${escapeHtml(profile.name)}\nТелефон: ${escapeHtml(profile.phone)}\n\nПриміщень у підключених групах: <b>${own.length}</b>\nІм’я й телефон є спільними для ваших заявок. Роль і доступ перевіряються окремо для кожного приміщення.${contributions?'\n\n'+contributions:''}`);
 }
 export async function showOwnUnits(env: Env,uid:number,page=0) {
   const rows = await ownMemberships(env,uid);

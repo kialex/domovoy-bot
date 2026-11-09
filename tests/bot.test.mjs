@@ -6,6 +6,7 @@ import worker from '../src/index.ts';
 import { apartmentNumber, parsePoll, ukrainianPhone } from '../src/validation.ts';
 import { entranceForApartment, commercialKey, validFloor } from '../src/premises.ts';
 import { pollCard } from '../src/presentation.ts';
+import { bankContributionStatements, scheduledCollections } from '../src/collections.ts';
 
 const isSend=method=>['sendMessage','sendRichMessage'].includes(method);
 
@@ -87,6 +88,114 @@ async function closePoll(h,id) {
 const groupMessage=p=>({message_id:p.message_id,chat:{id:p.chat_id,type:'supergroup'}});
 async function cast(h,uid,p,option){await h.cb(uid,`vote:${p.id}:${option}`,groupMessage(p));}
 const currentVotes=h=>h.sqlite.prepare('SELECT * FROM premise_votes ORDER BY premise_id').all();
+
+test('collection contributions accumulate once per resident and are visible only to that resident',async()=>{
+  const h=harness();
+  try{
+    const member=await register(h,2);
+    await register(h,3);
+    const reply=async(text)=>{
+      const prompt=h.calls.at(-1);
+      assert.equal(prompt.reply_markup.force_reply,true);
+      await h.dispatch({message:{message_id:1,chat:{id:1,type:'private'},from:{id:1},text,
+        reply_to_message:{message_id:2,chat:{id:1,type:'private'},from:{id:999,is_bot:true},text:prompt.text,entities:prompt.entities}}});
+    };
+    await h.cb(1,'hc:house:-100001');
+    await reply('Генератор');
+    const {id}=h.sqlite.prepare('SELECT id FROM house_collections').get();
+    for(const amount of ['1000','500,50']){
+      await h.cb(1,`hc:add:${id}`);
+      await reply('25');
+      await h.cb(1,`hc:person:${id}:${member.profile_id}`);
+      await reply(amount);
+      assert.equal((await h.post(h.lastUpdate)).status,200);
+    }
+    const totals=h.sqlite.prepare('SELECT profile_id,amount FROM collection_totals').all();
+    assert.equal(totals.length,1);
+    assert.equal(totals[0].amount,150050);
+    await h.msg(2,'👤 Мої дані');
+    assert.match(h.calls.at(-1).text,/Генератор — <b>1\s500,5 грн<\/b>/);
+    await h.msg(3,'👤 Мої дані');
+    assert.doesNotMatch(h.calls.at(-1).text,/Генератор/);
+    await h.cb(3,'hc:house:-100001');
+    assert.equal(h.calls.at(-1).method,'answerCallbackQuery');
+  }finally{h.close();}
+});
+
+test('bank contributions credit only the matching apartment and keep unresolved payments for review',async()=>{
+  const h=harness(2);
+  try{
+    const member=await register(h,2,{number:'84А'});
+    await register(h,3,{number:'84А',chat:-100002});
+    h.sqlite.exec(`INSERT INTO mono_connections(id,token_fingerprint,token_cipher,jars) VALUES ('c','fp','cipher','[]');
+      INSERT INTO mono_funds(id,connection_id,jar_id,chat_id,group_version,title,balance,deposits,daily,goal_notice,started_at,checked_at)
+        VALUES ('f','c','j',-100001,1,'Jar',0,1,0,0,0,0);
+      INSERT INTO house_collections(id,chat_id,title,mono_fund_id,bank_linked_at) VALUES (1,-100001,'Генератор','f',100);`);
+    const apply=(id,comment,time=101)=>h.env.HOME_DB.batch(bankContributionStatements(h.env,'f',{id,time,amount:150000,comment},{
+      legacy:'Старий формат',heading:'Поповнення\n',
+    }));
+    await apply('old','кв. 84А',99);
+    await apply('one','кв. 84a');
+    await apply('one','кв. 84a');
+    await apply('two','кв. 84А і кв. 25');
+    assert.equal(h.sqlite.prepare('SELECT amount FROM collection_totals WHERE premise_id=?').get(member.premise_id).amount,150000);
+    assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM collection_totals').get().n,1);
+    assert.equal(h.sqlite.prepare("SELECT collection_id FROM mono_operations WHERE operation_id='old'").get().collection_id,null);
+    assert.equal(h.sqlite.prepare("SELECT credited_premise_id FROM mono_operations WHERE operation_id='two'").get().credited_premise_id,null);
+    const notice=id=>h.sqlite.prepare('SELECT text FROM mono_outbox WHERE event_key=?').get('op:'+id).text;
+    assert.equal(notice('old'),'Старий формат');
+    assert.match(notice('one'),/Внесок зараховано квартирі <b>84А<\/b> автоматично/);
+    assert.equal(notice('two'),'Поповнення\nГенератор\nДякуємо за внесок!');
+    const {id}=h.sqlite.prepare("SELECT rowid AS id FROM mono_operations WHERE operation_id='one'").get();
+    await h.cb(1,`hc:move:1:${id}:${member.profile_id}`);
+    await h.cb(1,`hc:move:1:${id}:${member.profile_id}`);
+    const moved=h.sqlite.prepare('SELECT profile_id,amount FROM collection_totals').all();
+    assert.equal(moved.length,1);
+    assert.equal(moved[0].profile_id,member.profile_id);
+    assert.equal(moved[0].amount,150000);
+  }finally{h.close();}
+});
+
+test('public collection uses bank progress, edits it in place and replaces the post when due',async()=>{
+  const h=harness();
+  try{
+    h.sqlite.exec(`INSERT INTO mono_connections(id,token_fingerprint,token_cipher,jars) VALUES ('c','fp','cipher','[]');
+      INSERT INTO mono_funds(id,connection_id,jar_id,chat_id,group_version,title,balance,goal,deposits,daily,goal_notice,started_at,checked_at)
+        VALUES ('f','c','j',-100001,1,'Jar',3240000,15000000,1,0,0,0,0);
+      INSERT INTO house_collections(id,chat_id,title,description,requested_amount,mono_fund_id,bank_url,bank_card)
+        VALUES (1,-100001,'Генератор','Резервне живлення',240000,'f','https://send.monobank.ua/jar/demo','1111222233334444');`);
+    const publicCalls=()=>h.calls.filter(call=>call.chat_id===-100001);
+    const saved=()=>h.sqlite.prepare('SELECT * FROM house_collections WHERE id=1').get();
+    await h.cb(2,'hc:confirm:1:3600');
+    await h.cb(1,'hc:interval:1:3600');
+    assert.equal(publicCalls().length,0);
+    await h.cb(1,'hc:confirm:1:3600');
+    const first=saved().message_id;
+    const post=publicCalls().at(-1);
+    assert.match(post.text,/32\s400 грн/);
+    assert.match(post.text,/150\s000 грн/);
+    assert.match(post.text,/2\s400 грн/);
+    assert.match(post.text,/1111 2222 3333 4444/);
+    assert.equal(post.link_preview_options.is_disabled,true);
+    h.sqlite.exec("UPDATE mono_funds SET balance=3480000 WHERE id='f'");
+    await scheduledCollections(h.env);
+    const edit=publicCalls().at(-1);
+    assert.equal(edit.method,'editMessageText');
+    assert.equal(edit.message_id,first);
+    assert.match(edit.text,/34\s800 грн/);
+    h.sqlite.exec('UPDATE house_collections SET next_repost_at=unixepoch()-1');
+    await scheduledCollections(h.env);
+    assert.notEqual(saved().message_id,first);
+    assert.deepEqual(publicCalls().slice(-2).map(call=>call.method),['sendMessage','deleteMessage']);
+    assert.equal(publicCalls().at(-1).message_id,first);
+    await h.cb(1,'hc:close:1');
+    assert.equal(saved().next_repost_at,null);
+    assert.match(publicCalls().at(-1).text,/Завершено/);
+    const count=publicCalls().length;
+    await scheduledCollections(h.env);
+    assert.equal(publicCalls().length,count);
+  }finally{h.close();}
+});
 
 function importContact(h,number,phone='+380671234567',chat=-100001){
   const n=Number(number);const entrance=n<=84?1:n<=133?2:3;

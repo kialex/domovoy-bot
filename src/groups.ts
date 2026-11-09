@@ -2,7 +2,7 @@ import { publishGroupWelcome } from './group-welcome.ts';
 import type { Button, Callback, ChatMemberUpdate, Env } from './env.ts';
 import { answer, send } from './telegram.ts';
 
-export interface Group { chat_id: number; title: string; status: string; bot_present: number; version: number }
+export interface Group { chat_id: number; title: string; status: string; bot_present: number; version: number; city_notices_enabled?: number }
 export function groupId(value: string | undefined): number | null {
   if (!value || !/^-[1-9]\d*$/.test(value)) return null;
   const n = Number(value);
@@ -20,7 +20,11 @@ export function isConnected(group: Group | null): group is Group {
 const label = (g: Group) => `${g.title}\nID: ${g.chat_id}`;
 function controls(g: Group): Button[][] {
   if (!g.bot_present) return [];
-  if (g.status === 'approved') return [[{ text: 'Від’єднати групу', callback_data: `group:askdisconnect:${g.chat_id}:${g.version}` }]];
+  if (g.status === 'approved') return [
+    [{ text: g.city_notices_enabled ? 'Вимкнути 1562' : 'Увімкнути 1562',
+      callback_data: `group:${g.city_notices_enabled ? 'cityoff' : 'cityon'}:${g.chat_id}:${g.version}` }],
+    [{ text: 'Від’єднати групу', callback_data: `group:askdisconnect:${g.chat_id}:${g.version}` }],
+  ];
   return [
     [{ text: '✅ Підключити', callback_data: `group:approve:${g.chat_id}:${g.version}` }],
     ...(g.status === 'pending' ? [[{ text: 'Відхилити', callback_data: `group:reject:${g.chat_id}:${g.version}` }]] : []),
@@ -39,7 +43,8 @@ export async function groupMembership(env: Env, event: ChatMemberUpdate, updateI
   const version = !present || joined ? updateId : previous?.version || updateId;
   const result = await env.HOME_DB.prepare(`INSERT INTO groups(chat_id,title,status,bot_present,added_by,version,last_event_id)
     VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title,status=excluded.status,
-    bot_present=excluded.bot_present,added_by=excluded.added_by,version=excluded.version,last_event_id=excluded.last_event_id
+    bot_present=excluded.bot_present,added_by=excluded.added_by,version=excluded.version,last_event_id=excluded.last_event_id,
+    city_notices_enabled=CASE WHEN excluded.bot_present=0 THEN 0 ELSE groups.city_notices_enabled END
     WHERE groups.last_event_id < excluded.last_event_id`)
     .bind(event.chat.id, title, status, Number(present), event.from.id, version, updateId).run();
   if (!result.meta.changes) return;
@@ -83,6 +88,23 @@ export async function groupCallback(env: Env, q: Callback, updateId: number): Pr
   if (!g.bot_present || Number(rawVersion) !== g.version) {
     await answer(env, q.id, 'Ця кнопка застаріла. Відкрийте налаштування групи знову.'); return true;
   }
+  if ((action === 'cityon' || action === 'cityoff') && isConnected(g)) {
+    const enabled = Number(action === 'cityon');
+    const result = await env.HOME_DB.prepare(`UPDATE groups SET city_notices_enabled=?
+      WHERE chat_id=? AND version=? AND status='approved' AND bot_present=1
+      AND (?=0 OR NOT EXISTS (SELECT 1 FROM groups WHERE city_notices_enabled=1 AND chat_id<>?))`)
+      .bind(enabled,id,g.version,enabled,id).run();
+    await answer(env,q.id,'');
+    if (!result.meta.changes) {
+      await send(env,q.from.id,'1562 вже ввімкнено в іншій групі. Спочатку вимкніть його там.');
+      return true;
+    }
+    await send(env,q.from.id,enabled
+      ? `🔴 1562 увімкнено в групі «${g.title}». Адреса: просп. Героїв Харкова, 158.`
+      : `1562 вимкнено в групі «${g.title}».`,
+      controls({...g,city_notices_enabled:enabled}));
+    return true;
+  }
   if (action === 'askdisconnect' && g.status === 'approved') {
     await answer(env, q.id, 'Підтвердіть від’єднання.');
     await send(env, q.from.id, `Від’єднати групу ${g.title}?\nВідкриті голосування буде закрито. Реєстр мешканців та результати залишаться в історії.`, [[
@@ -106,7 +128,7 @@ export async function groupCallback(env: Env, q: Callback, updateId: number): Pr
   }
   if (action === 'disconnect' && g.status === 'approved') {
     await env.HOME_DB.batch([
-      env.HOME_DB.prepare("UPDATE groups SET status='disconnected',version=? WHERE chat_id=? AND version=?").bind(updateId, id, g.version),
+      env.HOME_DB.prepare("UPDATE groups SET status='disconnected',version=?,city_notices_enabled=0 WHERE chat_id=? AND version=?").bind(updateId, id, g.version),
       env.HOME_DB.prepare("UPDATE polls SET status='closed',next_repost_at=NULL WHERE chat_id=? AND status='open'").bind(id),
     ]);
     await answer(env, q.id, 'Групу від’єднано.');

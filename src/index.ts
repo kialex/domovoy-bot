@@ -1,3 +1,4 @@
+import { scheduledCityNotices } from './city-notices.ts';
 import { adminResidentCallback, adminResidentMessage } from './admin-resident.ts';
 import { groupRequest, groupRequestCallback } from './group-requests.ts';
 import { COLLECTIONS, clearCollectionInput, collectionCallback, collectionMessage, collectionsMenu, scheduledCollections } from './collections.ts';
@@ -110,6 +111,7 @@ export default {
     await retryGroupWelcomes(env);
     await scheduledMono(env);
     await scheduledCollections(env);
+    await scheduledCityNotices(env).catch(error=>console.error('1562 check failed',error));
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const path = new URL(request.url).pathname;

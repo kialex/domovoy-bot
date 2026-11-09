@@ -1691,3 +1691,77 @@ test('monobank deposit comments appear only when present and are escaped without
   assert.ok(sent.every(c=>!c.text.includes('Private Sender')));
  }finally{h.close();}
 });
+
+test('1562 seeds old notices, publishes new IDs and replies when the end time moves',async()=>{
+  const h=harness();
+  const telegramFetch=globalThis.fetch;
+  const empty='<loadedID style="display:none">-1</loadedID>';
+  const card=(id,end)=>`<div class="row" id="infoId${id}"><h5>Ремонт &amp; перевірка <span>~ Інші</span></h5>
+    <pre>Опис робіт<br>Другий рядок</pre><p class="titleDate">Початок: 09.11.26 09:15</p>
+    <p class="titleDate">Заплановано: 11.11.26 ${end}</p></div>`;
+  const check=()=>worker.scheduled({},h.env);
+  let cards=card(249847,'20:00');
+  let requests=0;
+  globalThis.fetch=async(url,init)=>{
+    if(!url.includes('1562.kharkivrada.gov.ua'))return telegramFetch(url,init);
+    requests++;
+    assert.equal(init.method,'POST');
+    const filter=new URLSearchParams(init.body.get('data'));
+    assert.equal(filter.get('skyscraperid'),'66540');
+    assert.ok(filter.getAll('InformType[]').length>0);
+    assert.equal(filter.get('radio1580datetype'),'1');
+    if(init.body.get('rn')==='0')return new Response(cards+'<loadedID>1</loadedID>');
+    assert.equal(init.body.get('rn'),'1');
+    return new Response(empty);
+  };
+  try {
+    await check();
+    assert.equal(requests,0);
+    await h.cb(2,'group:cityon:-100001:1');
+    await check();
+    assert.equal(requests,0);
+    await h.cb(1,'group:show:-100001');
+    assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.text==='Увімкнути 1562'));
+    await h.cb(1,'group:cityon:-100001:1');
+    const start=h.calls.length;
+    await check();
+    assert.equal(requests,2);
+    assert.equal(h.calls.length,start);
+    assert.equal(h.sqlite.prepare('SELECT message_id FROM city_notices WHERE notice_id=249847').get().message_id,null);
+
+    cards+=card(249848,'20:00');
+    await check();
+    const sent=h.calls.at(-1);
+    assert.equal(sent.method,'sendMessage');
+    assert.equal(sent.chat_id,-100001);
+    assert.match(sent.text,/Ремонт &amp; перевірка/);
+    assert.match(sent.text,/Опис робіт\nДругий рядок/);
+    const {message_id}=h.sqlite.prepare('SELECT message_id FROM city_notices WHERE notice_id=249848').get();
+    const published=h.calls.length;
+    await check();
+    assert.equal(h.calls.length,published);
+
+    cards=card(249847,'20:00')+card(249848,'22:00');
+    await check();
+    assert.deepEqual(h.calls.slice(published).map(c=>c.method),['editMessageText','sendMessage']);
+    assert.equal(h.calls[published].message_id,message_id);
+    assert.deepEqual(h.calls.at(-1).reply_parameters,{message_id});
+    assert.equal(h.calls.at(-1).text,'🔴 <b>1562 · Оновлення</b>\nЗавершення робіт перенесли з <b>20:00</b> на <b>22:00</b>.');
+    await check();
+    assert.equal(h.calls.length,published+2);
+    const completed = id => card(id,'22:00').replace('Заплановано: 11.11.26 22:00','Кінець: 11.11.26 11:53');
+    cards = completed(249847)+completed(249848)+completed(249849);
+    const beforeCompletion = h.calls.length;
+    await check();
+    assert.deepEqual(h.calls.slice(beforeCompletion).map(c=>c.method),['editMessageText','sendMessage']);
+    assert.match(h.calls[beforeCompletion].text,/Планове завершення: 11\.11\.26 22:00\nФактичне завершення: 11\.11\.26 11:53/);
+    assert.deepEqual(h.calls.at(-1).reply_parameters,{message_id});
+    assert.match(h.calls.at(-1).text,/Роботи завершено[\s\S]*Ремонт &amp; перевірка[\s\S]*11 листопада о 11:53/);
+    await check();
+    assert.equal(h.calls.length,beforeCompletion+2);
+    await h.cb(1,'group:cityoff:-100001:1');
+    const stopped=requests;
+    await check();
+    assert.equal(requests,stopped);
+  } finally {h.close();}
+});

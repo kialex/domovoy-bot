@@ -142,12 +142,13 @@ test('collection contributions accumulate once per resident and are visible only
     await h.cb(3,'hc:house:-100001');
     assert.equal(h.calls.at(-1).method,'answerCallbackQuery');
     await h.cb(1,`hc:add:${id}`);
-    assert.match(h.calls.at(-1).text,/Генератор · Оберіть квартиру/);
+    assert.match(h.calls.at(-1).text,/Генератор · Оберіть приміщення/);
     assert.match(h.calls.at(-1).text,new RegExp(`directory:tree:-100001:1:-:0:0:${id}`));
     await h.cb(1,`directory:tree:-100001:1:2:${member.premise_id}:0:${id}`);
     assert.match(h.calls.at(-1).text,new RegExp(`hc:apartment:${id}:${member.premise_id}`));
     await h.cb(1,`hc:apartment:${id}:${member.premise_id}`);
     await h.msg(1,'2400');
+    assert.ok(h.calls.some(call=>Number(call.chat_id)===2 && /2\s400 грн<\/b> від квартири <b>25<\/b>/.test(call.text)));
     assert.match(h.calls.at(-1).text,/Кв. 25 · Генератор — зараховано 2\s400 грн/);
     await h.cb(1,`directory:tree:-100001:1:2:${member.premise_id}:0`);
     assert.match(h.calls.at(-1).text,/Внески квартири.*Генератор — <b>2\s400 грн/s);
@@ -156,6 +157,24 @@ test('collection contributions accumulate once per resident and are visible only
     assert.match(h.calls.at(-1).text,/Кв. 25 · Генератор/);
     await h.msg(1,'100');
     assert.equal(h.sqlite.prepare('SELECT amount FROM collection_totals WHERE premise_id=?').get(member.premise_id).amount,250000);
+    const business=await register(h,4,{kind:'commercial',business:'Майстерня'});
+    h.sqlite.prepare('UPDATE house_collections SET closed=1 WHERE id=?').run(id);
+    await h.cb(1,`hc:add:${id}`);
+    assert.match(h.calls.at(-1).text,/Комерція/);
+    await h.cb(1,`directory:tree:-100001:c:-:${business.premise_id}:0:${id}`);
+    assert.match(h.calls.at(-1).text,new RegExp(`hc:apartment:${id}:${business.premise_id}`));
+    await h.cb(1,`hc:apartment:${id}:${business.premise_id}`);
+    const beforeCredit=h.calls.length;
+    await h.msg(1,'5000');
+    const receipts=h.calls.slice(beforeCredit).filter(call=>call.method==='sendMessage' && /Дякуємо за внесок/.test(call.text));
+    assert.equal(receipts.length,1);
+    assert.equal(Number(receipts[0].chat_id),4);
+    assert.match(receipts[0].text,/На збір «Генератор» зараховано <b>5\s000 грн<\/b>/);
+    await h.post(h.lastUpdate);
+    assert.equal(h.calls.slice(beforeCredit).filter(call=>call.method==='sendMessage' && /Дякуємо за внесок/.test(call.text)).length,1);
+    assert.match(h.calls.at(-1).text,/Майстерня · Генератор — зараховано 5\s000 грн/);
+    assert.equal(h.sqlite.prepare('SELECT amount FROM collection_totals WHERE premise_id=?').get(business.premise_id).amount,500000);
+
 
   }finally{h.close();}
 });

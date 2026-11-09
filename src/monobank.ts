@@ -5,6 +5,7 @@ import { escapeHtml } from './presentation.ts';
 import { answer, send, sendHtml, telegram } from './telegram.ts';
 
 export const FUNDS='🫙 Банки monobank';
+export const ADD_BANK='➕ Підключити банку';
 const now=()=>Math.floor(Date.now()/1000);
 const id=()=>crypto.randomUUID().replace(/-/g,'').slice(0,12);
 const money=(n:number)=>new Intl.NumberFormat('uk-UA',{maximumFractionDigits:2}).format(n/100)+' ₴';
@@ -46,7 +47,7 @@ export async function clearMonoSetup(env:Env){
 export async function fundsMenu(env:Env){
   await clearMonoSetup(env);
   const rows=(await env.HOME_DB.prepare('SELECT * FROM mono_funds ORDER BY started_at DESC').all<Fund>()).results;
-  return telegram(env,'sendMessage',{chat_id:env.ADMIN_TELEGRAM_USER_ID,text:rows.length?'Ваші збори. Оберіть потрібний.':'Щоб підключити банку, натисніть «➕ Додати збір» унизу. Потім надішліть свій токен monobank — бот покаже ваші банки для вибору.',reply_markup:{keyboard:[[{text:'➕ Додати збір'}],[{text:'🏠 Головне меню'}]],resize_keyboard:true,is_persistent:true}}).then(async()=>{
+  return telegram(env,'sendMessage',{chat_id:env.ADMIN_TELEGRAM_USER_ID,text:rows.length?'Підключені банки. Оберіть банку.':'Щоб підключити банку, натисніть «Підключити банку» унизу. Потім надішліть свій токен monobank — бот покаже ваші банки для вибору.',reply_markup:{keyboard:[[{text:ADD_BANK}],[{text:'🏠 Головне меню'}]],resize_keyboard:true,is_persistent:true}}).then(async()=>{
     for(const f of rows)await fundCard(env,f);
   });
 }
@@ -73,7 +74,7 @@ export async function monoMessage(env:Env,m:Message){
   try{await telegram(env,'deleteMessage',{chat_id:m.chat.id,message_id:m.message_id});}catch{
     await send(env,m.from.id,'Не вдалося видалити повідомлення. Видаліть його самостійно й повторіть підключення.');return true;
   }
-  if(s.expires_at<=now()){await clearMonoSetup(env);await send(env,m.from.id,'Час підключення минув. Натисніть «Додати збір» знову.');return true;}
+  if(s.expires_at<=now()){await clearMonoSetup(env);await send(env,m.from.id,'Час підключення минув. Натисніть «Підключити банку» знову.');return true;}
   const token=m.text?.trim()||'';
   if(!/^[A-Za-z0-9_-]{20,512}$/.test(token)){await send(env,m.from.id,'Надішліть токен, скопійований із api.monobank.ua.');return true;}
   let jars:Jar[];

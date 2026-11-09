@@ -1,6 +1,6 @@
 import { groupRequest, groupRequestCallback } from './group-requests.ts';
 import { COLLECTIONS, clearCollectionInput, collectionCallback, collectionMessage, collectionsMenu, scheduledCollections } from './collections.ts';
-import { FUNDS, fundsMenu, startMono, monoMessage, monoCallback, scheduledMono, clearMonoSetup } from './monobank.ts';
+import { ADD_BANK, FUNDS, fundsMenu, startMono, monoMessage, monoCallback, scheduledMono, clearMonoSetup } from './monobank.ts';
 import { retryGroupWelcomes } from './group-welcome.ts';
 import { joinRequest, joinCallback, retryJoins } from './join-requests.ts';
 import { HOUSE_RESIDENTS, houseResidents, directoryCallback } from './house-residents.ts';
@@ -24,13 +24,13 @@ async function message(env: Env, m: Message, updateId: number) {
   if (command === '/id') return send(env, m.chat.id, `Ваш Telegram ID: ${m.from.id}`);
   const admin = String(m.from.id) === env.ADMIN_TELEGRAM_USER_ID;
   if (admin && (command.startsWith('/') || [...Object.values(ADMIN_ACTIONS),...Object.values(RESIDENT_ACTIONS),
-    COLLECTIONS,FUNDS,'💰 Збори коштів',HOUSE_RESIDENTS,'➕ Додати збір','🗳 Активні голосування','🏁 Завершені голосування'].some(action=>action===text))) {
+    COLLECTIONS,FUNDS,'💰 Збори коштів',HOUSE_RESIDENTS,ADD_BANK,'➕ Додати збір','🗳 Активні голосування','🏁 Завершені голосування'].some(action=>action===text))) {
     await clearCollectionInput(env);
   }
   if (admin && (command === '/menu' || text === ADMIN_ACTIONS.menu)) {await clearMonoSetup(env);return adminMenu(env);}
   if (admin && text === COLLECTIONS) {await clearMonoSetup(env);return collectionsMenu(env);}
   if (admin && (text === FUNDS || text === '💰 Збори коштів')) return fundsMenu(env);
-  if (admin && text === '➕ Додати збір') return startMono(env);
+  if (admin && (text === ADD_BANK || text === '➕ Додати збір')) return startMono(env);
   if (admin && (text === ADMIN_ACTIONS.polls || command === '/polls')) return adminPollList(env);
   if (admin && text === '🗳 Активні голосування') return adminPollList(env,0,'open');
   if (admin && text === '🏁 Завершені голосування') return adminPollList(env,0,'closed');

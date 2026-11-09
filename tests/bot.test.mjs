@@ -1299,7 +1299,7 @@ async function monoSetup(h){
     }
     return telegramFetch(url,init);
   };
-  await h.msg(1,'➕ Додати збір');await h.msg(1,monoToken);
+  await h.msg(1,'➕ Підключити банку');await h.msg(1,monoToken);
   const s=h.sqlite.prepare('SELECT * FROM mono_setup').get();
   assert.equal(s.step,'jar');
   await h.cb(1,`mono:jar:${s.nonce}:0`);

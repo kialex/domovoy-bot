@@ -24,7 +24,7 @@ export async function showOwnData(env: Env, uid: number) {
   if (!profile) return send(env,uid,'👤 Даних ще немає\nНатисніть «Додати приміщення», щоб пройти реєстрацію.');
   const own = await ownMemberships(env,uid);
   const contributions = await residentCollectionLines(env,uid);
-  const profileLines = [`👤 <b>Мої дані</b>\n\n${escapeHtml(profile.name)}\n📞 ${escapeHtml(profile.phone)}`];
+  const profileLines = [`👤 <b>Мої дані</b>\n${escapeHtml(profile.name)}\n📞 ${escapeHtml(profile.phone)}`];
   const apartmentCounts = new Map<string,number>();
   for(const unit of own) {
     if(unit.kind==='apartment')apartmentCounts.set(unit.number, (apartmentCounts.get(unit.number) ?? 0) + 1);
@@ -47,7 +47,7 @@ export async function showOwnData(env: Env, uid: number) {
     if(unit.kind==='apartment' && (apartmentCounts.get(unit.number) ?? 0)>1 && unit.group_title) {
       title = `🏘 ${unit.group_title}, ${premiseLabel(unit)}`;
     }
-    const lines = ['', `${roleIcon(unit.role)} ${roleLabel(unit.role)}`];
+    const lines = [`${roleIcon(unit.role)} ${roleLabel(unit.role)}`];
     if(unit.kind==='apartment') {
       const entrance = unit.entrance===null ? 'Під’їзд не вказано' : `Під’їзд ${unit.entrance}`;
       const floor = unit.floor===null ? 'Поверх не вказано' : `${unit.floor}-й поверх`;
@@ -57,7 +57,7 @@ export async function showOwnData(env: Env, uid: number) {
     const unitContributions = contributions.get(unit.id);
     if(unit.status==='approved' && unitContributions?.length) {
       const label = unit.kind==='apartment' ? `Внески квартири ${unit.number}:` : 'Внески:';
-      lines.push('', `💰 <b>${escapeHtml(label)}</b>`, ...unitContributions);
+      lines.push(`💰 <b>${escapeHtml(label)}</b>`, ...unitContributions);
     }
     await sendCard(`<b>${escapeHtml(title)}</b>`, lines);
   }

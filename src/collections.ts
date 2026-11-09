@@ -676,7 +676,7 @@ export async function residentCollectionLines(env: Env, uid: number) {
   const lines = new Map<number|null,string[]>();
   for(const row of results) {
     const entries = lines.get(row.premise_id) ?? [];
-    entries.push(`\n${escapeHtml(row.title)}\n<b>${money(row.amount)}</b>`);
+    entries.push(`${escapeHtml(row.title)} · <b>${money(row.amount)}</b>`);
     lines.set(row.premise_id, entries);
   }
   return lines;

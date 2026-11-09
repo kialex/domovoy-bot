@@ -6,15 +6,15 @@ import type { Membership, Premise } from './premises.ts';
 import { telegram } from './telegram.ts';
 
 interface TreeUnit extends Premise {member_count:number}
-export interface TreeState {chat:number;entrance:string;floor:string;unit:number;page:number}
+export interface TreeState {chat:number;entrance:string;floor:string;unit:number;page:number;collection?:number}
 const ROOT='-';const UNKNOWN='n';const UNITS_PER_PAGE=6;const PEOPLE_PER_PAGE=3;
 const clean=(text:string,max=120)=>text.replace(/\s+/g,' ').trim().slice(0,max);
-export const treeData=(s:TreeState)=>`directory:tree:${s.chat}:${s.entrance}:${s.floor}:${s.unit}:${s.page}`;
+export const treeData=(s:TreeState)=>`directory:tree:${s.chat}:${s.entrance}:${s.floor}:${s.unit}:${s.page}${s.collection?':'+s.collection:''}`;
 export const unitState=(p:Premise,page=0):TreeState=>({chat:p.chat_id,entrance:p.kind==='commercial'?'c':p.entrance===null?UNKNOWN:String(p.entrance),floor:p.kind==='commercial'?ROOT:p.floor===null?UNKNOWN:String(p.floor),unit:p.id,page});
 export function parseTreeState(parts:string[]):TreeState|null{
-  const [chat,entrance,floor,unit,page,...extra]=parts;
-  if(extra.length||!/^-[1-9]\d*$/.test(chat||'')||!['-','n','c','1','2','3'].includes(entrance)||!(/^(?:-|n|\d{1,2})$/).test(floor||'')||!/^\d+$/.test(unit||'')||!/^\d+$/.test(page||''))return null;
-  const s={chat:Number(chat),entrance,floor,unit:Number(unit),page:Number(page)};
+  const [chat,entrance,floor,unit,page,collection,...extra]=parts;
+  if(extra.length||(collection!==undefined&&(!/^[1-9]\d*$/.test(collection)||!Number.isSafeInteger(Number(collection))))||!/^-[1-9]\d*$/.test(chat||'')||!['-','n','c','1','2','3'].includes(entrance)||!(/^(?:-|n|\d{1,2})$/).test(floor||'')||!/^\d+$/.test(unit||'')||!/^\d+$/.test(page||''))return null;
+  const s={chat:Number(chat),entrance,floor,unit:Number(unit),page:Number(page),...(collection?{collection:Number(collection)}:{})};
   return Number.isSafeInteger(s.chat)&&Number.isSafeInteger(s.unit)&&Number.isSafeInteger(s.page)&&s.page<=100000?s:null;
 }
 const action=(text:string,data:string)=>`<tg-button type="callback_data" style="link" data="${escapeHtml(data)}">${escapeHtml(text)}</tg-button>`;
@@ -28,8 +28,14 @@ async function show(env:Env,text:string,buttons:Button[][],messageId?:number){
 export async function residentTree(env:Env,s:TreeState,messageId?:number){
   const group=await getGroup(env,s.chat);
   if(!isConnected(group))return show(env,'Будинок недоступний.',[],messageId);
-  const units=(await env.HOME_DB.prepare(`SELECT p.*,COUNT(m.id) member_count FROM premises p JOIN memberships m ON m.premise_id=p.id AND m.status IN ('approved','pending') WHERE p.chat_id=? GROUP BY p.id ORDER BY p.kind,p.entrance,p.floor,p.number_start,p.number,p.business_name`).bind(s.chat).all<TreeUnit>()).results;
-  if(!units.length)return show(env,'Мешканців ще немає.',[],messageId);
+  const collection=s.collection&&await env.HOME_DB.prepare(
+    'SELECT title FROM house_collections WHERE id=? AND chat_id=? AND closed=0'
+  ).bind(s.collection,s.chat).first<{title:string}>();
+  if(s.collection&&!collection)return show(env,'Збір недоступний.',[],messageId);
+  const units=(await env.HOME_DB.prepare(`SELECT p.*,COUNT(m.id) member_count FROM premises p JOIN memberships m ON m.premise_id=p.id AND m.status IN ('approved','pending') WHERE p.chat_id=? AND (?=0 OR p.kind='apartment') GROUP BY p.id ORDER BY p.kind,p.entrance,p.floor,p.number_start,p.number,p.business_name`).bind(s.chat,s.collection??0).all<TreeUnit>()).results;
+  const addResident = !s.collection && s.entrance===ROOT
+    ? [[{text:'＋ Додати мешканця',callback_data:`ar:start:${s.chat}`}]] : [];
+  if(!units.length)return show(env,'Мешканців ще немає.',addResident,messageId);
   const branchKey=(p:Premise)=>p.kind==='commercial'?'c':p.entrance===null?UNKNOWN:String(p.entrance);
   const floorKey=(p:Premise)=>p.floor===null?UNKNOWN:String(p.floor);
   const branches=[...new Set(units.map(branchKey))];
@@ -44,10 +50,15 @@ export async function residentTree(env:Env,s:TreeState,messageId?:number){
   const visibleUnits=levelUnits.slice(unitPage*UNITS_PER_PAGE,(unitPage+1)*UNITS_PER_PAGE);
   const peoplePage=selected?Math.min(s.page,Math.max(0,Math.ceil(selected.member_count/PEOPLE_PER_PAGE)-1)):0;
   const people=selected?(await env.HOME_DB.prepare(`SELECT m.*,u.name,u.phone,u.telegram_username FROM memberships m JOIN profiles u ON u.id=m.profile_id WHERE m.premise_id=? AND m.status IN ('approved','pending') ORDER BY u.name,m.id LIMIT ? OFFSET ?`).bind(selected.id,PEOPLE_PER_PAGE+1,peoplePage*PEOPLE_PER_PAGE).all<Membership>()).results:[];
+  const contributions=selected?.kind==='apartment'?(await env.HOME_DB.prepare(`SELECT c.title,t.amount
+    FROM collection_totals t JOIN house_collections c ON c.id=t.collection_id
+    WHERE t.premise_id=? AND c.chat_id=? ORDER BY c.closed,c.id DESC LIMIT 6`)
+    .bind(selected.id,s.chat).all<{title:string;amount:number}>()).results:[];
   const base={...s,unit:0,page:0};
   const root={...base,entrance:ROOT,floor:ROOT};
   const branchAction=(text:string,state:TreeState)=>action(text,treeData(state));
   const lines=[`🏠 ${branchAction(clean(group.title,80),root)}`];
+  if(collection)lines.push(`💰 ${escapeHtml(collection.title)} · Оберіть квартиру`);
   const line=(prefix:string,content:string)=>lines.push(`<code>${prefix.replace(/ /g,' ')}</code>${content}`);
   const peopleLines=(prefix:string)=>{
     people.slice(0,PEOPLE_PER_PAGE).forEach((m,i)=>{
@@ -70,7 +81,22 @@ export async function residentTree(env:Env,s:TreeState,messageId?:number){
       const last=i===visibleUnits.length-1;const tail=last?'└─ ':'├─ ';const open=p.id===s.unit;
       const name=p.kind==='commercial'?clean(p.business_name,60):`Кв. ${p.number}`;
       line(prefix+tail,branchAction(`${open?'▾':'▸'} ${name}`,{...base,unit:open?0:p.id,page:open?unitPage:0}));
-      if(open)peopleLines(prefix+(last?'   ':'│  '));
+      if(open) {
+        const details=prefix+(last?'   ':'│  ');
+        peopleLines(details);
+        if(p.kind==='apartment') {
+          if(contributions.length) {
+            line(details,'<b>Внески квартири</b>');
+            const format=new Intl.NumberFormat('uk-UA',{maximumFractionDigits:2});
+            for(const entry of contributions.slice(0,5)) {
+              line(details,`${escapeHtml(entry.title)} — <b>${format.format(entry.amount/100)} грн</b>`);
+            }
+            if(contributions.length>5)line(details,action('Усі внески',`hc:history:${p.id}:0`));
+          }
+          const target=collection?`hc:apartment:${s.collection}:${p.id}`:`hc:unit:${p.id}:0`;
+          line(details,action('＋ Зарахувати внесок',target));
+        }
+      }
     });
     if(levelUnits.length>(unitPage+1)*UNITS_PER_PAGE)line(prefix,branchAction('Наступні приміщення →',{...base,page:unitPage+1}));
   };
@@ -87,7 +113,7 @@ export async function residentTree(env:Env,s:TreeState,messageId?:number){
       if(expanded)unitLines(prefix+(end?'   ':'│  '));
     });
   });
-  return show(env,lines.join('\n'),[],messageId);
+  return show(env,lines.join('\n'),addResident,messageId);
 }
 export async function unitTree(env:Env,id:number,page:number,messageId?:number){
   const p=await env.HOME_DB.prepare('SELECT * FROM premises WHERE id=?').bind(id).first<Premise>();

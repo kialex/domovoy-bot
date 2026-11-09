@@ -1,3 +1,4 @@
+import { residentTree } from './resident-tree.ts';
 import type { Button, Callback, Env, Message } from './env.ts';
 import { connectedGroups, getGroup, groupId, isConnected } from './groups.ts';
 import { escapeHtml, kyivDate } from './presentation.ts';
@@ -80,7 +81,7 @@ async function collectionCard(env: Env, collection: Collection, page = 0) {
   if(!collection.closed) {
     buttons.push(button(collection.message_id?'Підняти в чаті':'Переглянути й опублікувати',
       `hc:${collection.message_id?'raise':'publish'}:${collection.id}`));
-    buttons.push(button('Додати внесок',`hc:add:${collection.id}`));
+    buttons.push(button('Зарахувати внесок',`hc:add:${collection.id}`));
     buttons.push(button('Налаштування збору',`hc:settings:${collection.id}`));
   }
   const {total,goal}=await collectionProgress(env,collection);
@@ -135,6 +136,13 @@ export async function collectionCallback(env: Env, q: Callback) {
     return true;
   }
   await clearCollectionInput(env);
+  if(action==='unit'||action==='history') {
+    const premiseId=positiveId(raw);
+    if(premiseId&&Number.isSafeInteger(page)&&page>=0&&page<=10000) {
+      await apartmentCollections(env,premiseId,action,page);
+    }
+    return true;
+  }
   const id=positiveId(raw);
   const collection=id&&await findCollection(env,id);
   if(!collection)return true;
@@ -144,6 +152,7 @@ export async function collectionCallback(env: Env, q: Callback) {
       button('Обрати банку',`hc:banks:${id}`),
       ...(collection.mono_fund_id?[button('Посилання на банку',`hc:bank_url:${id}`),button('Номер картки банки',`hc:card:${id}`)]:[]),
       ...(collection.message_id?[button('Частота підняття',`hc:publish:${id}`)]:[]),
+      button('Зарахувати внесок мешканцю',`hc:personadd:${id}`),
       button('Завершити збір',`hc:finish:${id}`),button('До збору',`hc:view:${id}`),
     ]);
     return true;
@@ -212,6 +221,9 @@ export async function collectionCallback(env: Env, q: Callback) {
     await send(env,q.from.id,await publishCollection(env,collection,collection.repost_interval)?'Збір піднято.':'Публікація вже виконується або збір недоступний.');
   }
   if(action==='add') {
+    await residentTree(env,{chat:collection.chat_id,entrance:'-',floor:'-',unit:0,page:0,collection:collection.id});
+  }
+  if(action==='personadd') {
     await askCollectionInput(env,'apartment',collection.id,'Напишіть номер квартири.');
   }
   if(action==='person'||action==='apartment') {
@@ -251,6 +263,35 @@ export async function collectionCallback(env: Env, q: Callback) {
     } else await collectionCard(env,saved);
   }
   return true;
+}
+
+async function apartmentCollections(env: Env, premiseId: number, action: 'unit'|'history', page: number) {
+  const premise=await env.HOME_DB.prepare("SELECT number,chat_id FROM premises WHERE id=? AND kind='apartment'")
+    .bind(premiseId).first<{number:string;chat_id:number}>();
+  if(!premise||!isConnected(await getGroup(env,premise.chat_id)))return;
+
+  const history=action==='history';
+  const query=history
+    ? `SELECT c.id,c.title,t.amount FROM collection_totals t JOIN house_collections c ON c.id=t.collection_id
+       WHERE c.chat_id=? AND t.premise_id=? ORDER BY c.closed,c.id DESC LIMIT ? OFFSET ?`
+    : `SELECT id,title,NULL AS amount FROM house_collections WHERE chat_id=? AND closed=0
+       ORDER BY id DESC LIMIT ? OFFSET ?`;
+  const scope=history?[premise.chat_id,premiseId]:[premise.chat_id];
+  const {results}=await env.HOME_DB.prepare(query).bind(...scope,PAGE_SIZE+1,page*PAGE_SIZE)
+    .all<{id:number;title:string;amount:number|null}>();
+  const entries=results.slice(0,PAGE_SIZE);
+  const label=`Кв. ${premise.number}`;
+  if(!history&&page===0&&entries.length===1) {
+    await askCollectionInput(env,'apartment_amount',entries[0].id,
+      `${label} · ${entries[0].title}\nНапишіть суму внеску в гривнях.`,premiseId);
+    return;
+  }
+  const buttons=history?[]:entries.map(entry=>button(entry.title,`hc:apartment:${entry.id}:${premiseId}`));
+  if(page>0)buttons.push(button('← Назад',`hc:${action}:${premiseId}:${page-1}`));
+  if(results.length>PAGE_SIZE)buttons.push(button('Далі →',`hc:${action}:${premiseId}:${page+1}`));
+  const detail=history?entries.map(entry=>`${entry.title} — ${money(entry.amount!)}`).join('\n')
+    : entries.length?'Оберіть збір.':'Відкритих зборів немає.';
+  await send(env,env.ADMIN_TELEGRAM_USER_ID,`${label}\n${detail}`,buttons);
 }
 
 async function chooseCollectionBank(env: Env, collection: Collection, guided = false) {
@@ -556,7 +597,13 @@ async function handleCollectionInput(env: Env, uid: number, pending: {raw:string
     env.HOME_DB.prepare("UPDATE updates SET state='done' WHERE id=?").bind(updateId),
   ]);
   if(!results[0].meta.changes)await send(env,uid,'Не вдалося зарахувати внесок.');
-  else await collectionCard(env,collection);
+  else if(resident)await collectionCard(env,collection);
+  else {
+    const premise=await env.HOME_DB.prepare('SELECT number FROM premises WHERE id=?').bind(subject).first<{number:string}>();
+    await send(env,uid,`Кв. ${premise?.number} · ${collection.title} — зараховано ${money(amount)}`,[
+      button('Зарахувати іншій квартирі',`hc:add:${collection.id}`),
+    ]);
+  }
   return true;
 }
 

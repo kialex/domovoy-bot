@@ -1,3 +1,4 @@
+import { adminResidentCallback, adminResidentMessage } from './admin-resident.ts';
 import { groupRequest, groupRequestCallback } from './group-requests.ts';
 import { COLLECTIONS, clearCollectionInput, collectionCallback, collectionMessage, collectionsMenu, scheduledCollections } from './collections.ts';
 import { ADD_BANK, FUNDS, fundsMenu, startMono, monoMessage, monoCallback, scheduledMono, clearMonoSetup } from './monobank.ts';
@@ -65,6 +66,7 @@ async function message(env: Env, m: Message, updateId: number) {
     return id ? pollControls(env,id) : adminPollList(env);
   }
   if (command === '/help') return admin ? adminMenu(env) : residentMenu(env,m.from.id);
+  if (await adminResidentMessage(env,m)) return;
   if (await collectionMessage(env,m,updateId)) return;
   if (await monoMessage(env,m)) return;
   const registration = await env.HOME_DB.prepare('SELECT user_id FROM sessions WHERE user_id=?').bind(m.from.id).first();
@@ -88,6 +90,7 @@ export async function handleUpdate(env: Env, update: Update) {
     if (q.from.is_bot) return;
     if (await groupRequestCallback(env,q)) return;
     if (await monoCallback(env,q)) return;
+    if (await adminResidentCallback(env,q)) return;
     if (await collectionCallback(env,q)) return;
     if (await joinCallback(env,q)) return;
     if (await directoryCallback(env,q)) return;

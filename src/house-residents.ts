@@ -40,6 +40,7 @@ export async function directoryCallback(env:Env,q:Callback):Promise<boolean> {
   const id=Number(raw);if(!Number.isSafeInteger(id)||!id)return true;
   if(action==='house'){if(id<0)await houseUnits(env,id,q.message.message_id);return true;}
   if(!positiveId(raw))return true;
+  if(action==='open'){await unitTree(env,id,0);return true;}
   if(action==='members'){await unitTree(env,id,page,q.message.message_id);return true;}
   if(action==='person'){
     const m=await env.HOME_DB.prepare(`${membershipSelect.replace('SELECT p.*','SELECT u.telegram_username,p.*')} WHERE m.id=? AND m.status IN ('approved','pending')`).bind(id).first<Membership>();

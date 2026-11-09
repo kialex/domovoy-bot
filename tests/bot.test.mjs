@@ -89,6 +89,32 @@ const groupMessage=p=>({message_id:p.message_id,chat:{id:p.chat_id,type:'supergr
 async function cast(h,uid,p,option){await h.cb(uid,`vote:${p.id}:${option}`,groupMessage(p));}
 const currentVotes=h=>h.sqlite.prepare('SELECT * FROM premise_votes ORDER BY premise_id').all();
 
+test('administrator adds a resident and a new apartment from an empty house tree',async()=>{
+  const h=harness();
+  try {
+    await h.msg(1,'👥 Мешканці будинку');
+    assert.match(h.calls.at(-1).text,/ar:start:-100001/);
+    await h.cb(2,'ar:start:-100001');
+    await h.cb(1,'ar:start:-100001');
+    await h.msg(1,'84a');
+    await h.msg(1,'14');
+    await h.msg(1,'0671234567');
+    await h.msg(1,'Олена Коваль');
+    const role=h.calls.at(-1).reply_markup.inline_keyboard[0][0];
+    await h.cb(1,role.callback_data);
+    assert.match(h.calls.at(-1).text,/Нова квартира 84А.*поверх 14/);
+    assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM premises').get().n,0);
+    const save=h.calls.at(-1).reply_markup.inline_keyboard[0][0];
+    await h.cb(1,save.callback_data);
+    await h.cb(1,save.callback_data);
+    const resident=h.sqlite.prepare(`SELECT p.number,p.floor,u.phone,u.user_id,m.role,m.status
+      FROM premises p JOIN memberships m ON m.premise_id=p.id JOIN profiles u ON u.id=m.profile_id`).all();
+    assert.deepEqual(resident.map(row=>({...row})),[
+      {number:'84А',floor:14,phone:'+380671234567',user_id:null,role:'owner',status:'approved'},
+    ]);
+  } finally {h.close();}
+});
+
 test('collection contributions accumulate once per resident and are visible only to that resident',async()=>{
   const h=harness();
   try{
@@ -100,7 +126,7 @@ test('collection contributions accumulate once per resident and are visible only
     await reply('Генератор');
     const {id}=h.sqlite.prepare('SELECT id FROM house_collections').get();
     for(const amount of ['1000','500,50']){
-      await h.cb(1,`hc:add:${id}`);
+      await h.cb(1,`hc:personadd:${id}`);
       await reply('25');
       await h.cb(1,`hc:person:${id}:${member.profile_id}`);
       await reply(amount);
@@ -115,6 +141,22 @@ test('collection contributions accumulate once per resident and are visible only
     assert.doesNotMatch(h.calls.at(-1).text,/Генератор/);
     await h.cb(3,'hc:house:-100001');
     assert.equal(h.calls.at(-1).method,'answerCallbackQuery');
+    await h.cb(1,`hc:add:${id}`);
+    assert.match(h.calls.at(-1).text,/Генератор · Оберіть квартиру/);
+    assert.match(h.calls.at(-1).text,new RegExp(`directory:tree:-100001:1:-:0:0:${id}`));
+    await h.cb(1,`directory:tree:-100001:1:2:${member.premise_id}:0:${id}`);
+    assert.match(h.calls.at(-1).text,new RegExp(`hc:apartment:${id}:${member.premise_id}`));
+    await h.cb(1,`hc:apartment:${id}:${member.premise_id}`);
+    await h.msg(1,'2400');
+    assert.match(h.calls.at(-1).text,/Кв. 25 · Генератор — зараховано 2\s400 грн/);
+    await h.cb(1,`directory:tree:-100001:1:2:${member.premise_id}:0`);
+    assert.match(h.calls.at(-1).text,/Внески квартири.*Генератор — <b>2\s400 грн/s);
+    assert.doesNotMatch(h.calls.at(-1).text,/1\s500,5 грн/);
+    await h.cb(1,`hc:unit:${member.premise_id}:0`);
+    assert.match(h.calls.at(-1).text,/Кв. 25 · Генератор/);
+    await h.msg(1,'100');
+    assert.equal(h.sqlite.prepare('SELECT amount FROM collection_totals WHERE premise_id=?').get(member.premise_id).amount,250000);
+
   }finally{h.close();}
 });
 

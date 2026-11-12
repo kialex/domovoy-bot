@@ -1895,7 +1895,9 @@ test('monobank webhook credits once, filters accounts and paused groups, and kee
     const member=await register(h,2,{number:'25'});
     h.apiOverride=method=>method==='getWebhookInfo'?Response.json({ok:true,result:{url:'https://home.test/telegram/webhook'}}):null;
     const f=await saveMono(h,await monoSetup(h));
-    h.sqlite.prepare("INSERT INTO house_collections(id,chat_id,title,mono_fund_id,bank_linked_at) VALUES (1,-100001,'Генератор',?,0)").run(f.id);
+    const linkedPoll=await poll(h);
+    h.sqlite.prepare("INSERT INTO house_collections(id,chat_id,title,mono_fund_id,bank_linked_at,vote_poll_id,vote_option_index,message_id) VALUES (1,-100001,'Генератор',?,0,?,1,777777)").run(f.id,linkedPoll.id);
+
     const tasks=[];
     const post=async(o,account='jar-1',url=h.registeredMonoUrl)=>{
       const response=await worker.fetch(new Request(url,{method:'POST',body:JSON.stringify({type:'StatementItem',data:{account,statementItem:o}})}),h.env,{waitUntil:p=>tasks.push(p)});
@@ -1908,6 +1910,10 @@ test('monobank webhook credits once, filters accounts and paused groups, and kee
     assert.equal(await post({...op,time:f.started_at-1}),200);
     assert.equal(await post({...op,amount:'150000'}),400);
     assert.equal(await post(op),200);
+    const updated=h.calls.filter(c=>c.method==='editMessageText'&&c.message_id===777777).at(-1);
+    assert.match(updated.text,/Зробили внесок — <b>1 із 1 квартири<\/b>, яка підтримала збір/);
+    assert.match(updated.text,/Зібрано — <b>2\s500 грн<\/b>/);
+
     assert.equal(await post(op),200);
     assert.equal(h.sqlite.prepare('SELECT amount FROM collection_totals WHERE premise_id=?').get(member.premise_id).amount,150000);
     assert.equal(h.calls.filter(c=>c.text?.startsWith('Дякуємо за участь у зборі!')).length,1);
@@ -1971,5 +1977,121 @@ test('group answers require approved registration in this house before AI, repor
     // The link opens registration for the same house even with several connected groups.
     await h.msg(5,'/start group_100001');
     assert.equal(h.form(5).chat_id,-100001);
+  }finally{h.close();}
+});
+
+
+test('collection publication uses cached monobank sendId with jar prefix and keeps manual URL priority',async()=>{
+  const h=harness();try{
+    h.sqlite.exec(`INSERT INTO mono_connections(id,token_fingerprint,token_cipher,jars) VALUES ('c','fp','cipher','[]');
+      INSERT INTO mono_funds(id,connection_id,jar_id,chat_id,group_version,title,balance,goal,deposits,daily,goal_notice,started_at,checked_at)
+        VALUES ('f','c','j',-100001,1,'Jar',6079968,15000000,1,0,0,0,0);
+      INSERT INTO house_collections(id,chat_id,title,mono_fund_id,requested_amount,message_id)
+        VALUES (1,-100001,'Генератор','f',200000,123);`);
+    for(const sendId of ['jar/6eeg36jYWW','6eeg36jYWW']){
+      h.sqlite.prepare('UPDATE mono_connections SET jars=?').run(JSON.stringify([{id:'j',sendId}]));
+      h.sqlite.exec('UPDATE house_collections SET published_hash=NULL');
+      h.calls.length=0;await scheduledCollections(h.env);
+      const post=h.calls.find(c=>c.method==='editMessageText');
+      assert.match(post.text,/href="https:\/\/send\.monobank\.ua\/jar\/6eeg36jYWW"/);
+      assert.match(post.text,/Наприклад, <code>кв\. 25<\/code>/);
+      assert.equal(post.link_preview_options.is_disabled,true);
+      assert.doesNotMatch(post.text,/Номер картки/);
+    }
+    h.sqlite.exec("UPDATE house_collections SET bank_url='https://send.monobank.ua/jar/manual',published_hash=NULL");
+    h.calls.length=0;await scheduledCollections(h.env);
+    assert.match(h.calls.find(c=>c.method==='editMessageText').text,/href="https:\/\/send\.monobank\.ua\/jar\/manual"/);
+  }finally{h.close();}
+});
+
+
+test('collection creation skips the link question when monobank provides its jar sendId',async()=>{
+  const h=harness();try{
+    h.sqlite.prepare("INSERT INTO mono_connections(id,token_fingerprint,token_cipher,jars) VALUES ('c','fp','cipher',?)")
+      .run(JSON.stringify([{id:'j',sendId:'jar/6eeg36jYWW'}]));
+    h.sqlite.exec(`INSERT INTO mono_funds(id,connection_id,jar_id,chat_id,group_version,title,balance,goal,deposits,daily,goal_notice,started_at,checked_at)
+      VALUES ('f','c','j',-100001,1,'Jar',6079968,15000000,1,0,0,0,0);`);
+    const press=async(label)=>{
+      const button=h.calls.at(-1).reply_markup.inline_keyboard.flat().find(b=>b.text===label);
+      assert.ok(button,label);await h.cb(1,button.callback_data);
+    };
+    await h.msg(1,'💰 Збори');await press('➕ Створити збір');
+    await h.msg(1,'Генератор');await h.msg(1,'Резервне живлення');await h.msg(1,'2000');
+    const before=h.calls.length;await press('Jar');
+    const input=JSON.parse(h.sqlite.prepare('SELECT collection_input FROM private_chats WHERE user_id=1').get().collection_input);
+    assert.equal(input.step,'card');
+    assert.equal(h.calls.slice(before).some(c=>c.text?.includes('Надішліть посилання')),false);
+    await press('Пропустити');await press('Щогодини');
+    assert.match(h.calls.at(-1).text,/https:\/\/send\.monobank\.ua\/jar\/6eeg36jYWW/);
+  }finally{h.close();}
+});
+
+
+test('collection participation counts unique paid supporting apartments and updates after manual payments and votes',async()=>{
+  const h=harness(2);try{
+    const a=await register(h,2,{number:'25'});
+    const b=await register(h,3,{number:'26'});
+    const business=await register(h,4,{kind:'commercial',business:'Coffee'});
+    await register(h,5,{number:'25',chat:-100002});
+    await register(h,6,{number:'27'});
+    await register(h,7,{number:'25',role:'family'});
+    const p=await poll(h);await cast(h,2,p,1);await cast(h,3,p,0);await cast(h,4,p,1);
+    const other=await poll(h,-100002);await cast(h,5,other,1);
+    h.sqlite.prepare(`INSERT INTO house_collections(id,chat_id,title,requested_amount,vote_poll_id,vote_option_index,message_id)
+      VALUES (1,-100001,'Генератор',200000,?,1,777777)`).run(p.id);
+    h.sqlite.exec("INSERT INTO house_collections(id,chat_id,title,requested_amount,message_id) VALUES (2,-100001,'Без голосування',200000,888888)");
+    h.calls.length=0;await scheduledCollections(h.env);
+    const post=()=>h.calls.filter(c=>c.method==='editMessageText'&&c.message_id===777777).at(-1);
+    assert.match(post().text,/Зробили внесок — <b>0 із 1 квартири<\/b>/);
+    assert.equal(h.calls.find(c=>c.message_id===888888).text.includes('Зробили внесок'),false);
+    const pay=async(member,amount)=>{
+      await h.cb(1,`hc:apartment:1:${member.premise_id}`);h.calls.length=0;await h.msg(1,amount);
+    };
+    await pay(b,'2000');assert.match(post().text,/Зробили внесок — <b>0 із 1 квартири<\/b>/);
+    await pay(a,'1000');assert.match(post().text,/Зробили внесок — <b>1 із 1 квартири<\/b>/);
+    // A second payment changes the total, not the number of apartments.
+    await pay(a,'1000');assert.match(post().text,/Зробили внесок — <b>1 із 1 квартири<\/b>/);
+    await pay(business,'2000');assert.match(post().text,/Зробили внесок — <b>1 із 1 квартири<\/b>/);
+    h.calls.length=0;await cast(h,6,p,1);
+    assert.match(post().text,/Зробили внесок — <b>1 із 2 квартир<\/b>, які підтримали збір/);
+    // Changing the answer removes this paid apartment from both selected-answer counts.
+    h.calls.length=0;await cast(h,2,p,0);
+    assert.match(post().text,/Зробили внесок — <b>0 із 1 квартири<\/b>/);
+    await cast(h,2,p,1);assert.match(post().text,/Зробили внесок — <b>1 із 2 квартир<\/b>/);
+    await cast(h,7,p,1);
+    assert.equal(h.sqlite.prepare('SELECT COUNT(*) n FROM premise_votes WHERE poll_id=? AND premise_id=?').get(p.id,a.premise_id).n,1);
+  }finally{h.close();}
+});
+
+
+test('collection navigation edits the same private message for collection and contribution pages',async()=>{
+  const h=harness();try{
+    for(let i=1;i<=9;i++){
+      h.sqlite.prepare('INSERT INTO house_collections(id,chat_id,title,requested_amount) VALUES (?,-100001,?,200000)').run(i,'Збір '+i);
+      h.sqlite.prepare("INSERT INTO premises(id,chat_id,kind,number,number_start,number_end) VALUES (?,-100001,'apartment',?,?,?)").run(i,String(i),i,i);
+      h.sqlite.prepare('INSERT INTO collection_totals(collection_id,premise_id,amount) VALUES (1,?,200000)').run(i);
+    }
+    await h.msg(1,'💰 Збори');assert.ok(isSend(h.calls.at(-1).method));
+    const target={message_id:777,chat:{id:98765,type:'private'}};
+    h.calls.length=0;
+    await h.cb(1,'hc:list:1',target);
+    let edit=h.calls.find(c=>c.method==='editMessageText');
+    assert.equal(edit.message_id,777);assert.equal(edit.chat_id,98765);
+    assert.ok(edit.reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='hc:list:0'));
+    await h.cb(1,'hc:list:0',target);
+    await h.cb(1,'hc:view:1',target);
+    edit=h.calls.filter(c=>c.method==='editMessageText').at(-1);
+    assert.match(edit.text,/Кв\. 1 — 2\s000 грн/);assert.doesNotMatch(edit.text,/Кв\. 9 —/);
+    assert.ok(edit.reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='hc:view:1:1'));
+    await h.cb(1,'hc:view:1:1',target);
+    edit=h.calls.filter(c=>c.method==='editMessageText').at(-1);
+    assert.match(edit.text,/Кв\. 9 — 2\s000 грн/);assert.doesNotMatch(edit.text,/Кв\. 1 —/);
+    assert.ok(edit.reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='hc:view:1:0'));
+    await h.cb(1,'hc:view:1:0',target);
+    const edits=h.calls.filter(c=>c.method==='editMessageText');
+    assert.equal(edits.length,5);assert.ok(edits.every(c=>c.message_id===777&&c.chat_id===98765));
+    assert.equal(h.calls.some(c=>isSend(c.method)),false,'Browsing must not add chat messages');
+    h.calls.length=0;await h.cb(2,'hc:view:1:1');await h.cb(2,'hc:list:1');
+    assert.equal(h.calls.some(c=>c.method==='editMessageText'||isSend(c.method)),false);
   }finally{h.close();}
 });

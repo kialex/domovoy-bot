@@ -61,7 +61,17 @@ function findCollection(env: Env, id: number) {
     WHERE c.id=? AND g.status='approved' AND g.bot_present=1`).bind(id).first<Collection>();
 }
 
-export async function collectionsMenu(env: Env, page = 0) {
+async function collectionScreen(env:Env,text:string,buttons:Button[][],messageId?:number){
+  if(messageId===undefined)return sendHtml(env,env.ADMIN_TELEGRAM_USER_ID,text,buttons);
+  const chat=await env.HOME_DB.prepare('SELECT chat_id FROM private_chats WHERE user_id=?')
+    .bind(env.ADMIN_TELEGRAM_USER_ID).first<{chat_id:number}>();
+  return telegram(env,'editMessageText',{
+    chat_id:chat?.chat_id??env.ADMIN_TELEGRAM_USER_ID,message_id:messageId,text,parse_mode:'HTML',
+    reply_markup:{inline_keyboard:buttons},
+  });
+}
+
+export async function collectionsMenu(env: Env, page = 0, messageId?:number) {
   const {results} = await env.HOME_DB.prepare(`SELECT c.* FROM house_collections c JOIN groups g ON g.chat_id=c.chat_id
     WHERE g.status='approved' AND g.bot_present=1 ORDER BY c.closed,c.id DESC LIMIT ? OFFSET ?`)
     .bind(PAGE_SIZE+1,page*PAGE_SIZE).all<Collection>();
@@ -69,10 +79,10 @@ export async function collectionsMenu(env: Env, page = 0) {
     button((c.closed?'🏁 ':c.message_id?'':'📝 ')+c.title,`hc:view:${c.id}`))];
   if(page>0)buttons.push(button('← Назад',`hc:list:${page-1}`));
   if(results.length>PAGE_SIZE)buttons.push(button('Далі →',`hc:list:${page+1}`));
-  await send(env,env.ADMIN_TELEGRAM_USER_ID,results.length?'Оберіть збір або створіть новий.':'Зборів ще немає.',buttons);
+  await collectionScreen(env,results.length?'Оберіть збір або створіть новий.':'Зборів ще немає.',buttons,messageId);
 }
 
-async function collectionCard(env: Env, collection: Collection, page = 0) {
+async function collectionCard(env: Env, collection: Collection, page = 0, messageId?:number) {
   const {results} = await env.HOME_DB.prepare(`SELECT t.amount,u.name,p.number,p.business_name
     FROM collection_totals t LEFT JOIN profiles u ON u.id=t.profile_id LEFT JOIN premises p ON p.id=t.premise_id
     WHERE t.collection_id=? ORDER BY p.number_start,p.number,u.name,t.rowid LIMIT ? OFFSET ?`)
@@ -97,8 +107,8 @@ async function collectionCard(env: Env, collection: Collection, page = 0) {
   if(pending)buttons.push(button('Внески з банки',`hc:bankpayments:${collection.id}`));
   if(page>0)buttons.push(button('← Назад',`hc:view:${collection.id}:${page-1}`));
   if(results.length>PAGE_SIZE)buttons.push(button('Далі →',`hc:view:${collection.id}:${page+1}`));
-  await sendHtml(env,env.ADMIN_TELEGRAM_USER_ID,
-    `💰 <b>${escapeHtml(collection.title)}</b>${collection.closed?' · Завершено':collection.message_id?' · Опубліковано':' · Чернетка'}\nЗібрано — <b>${progress}</b>${voteInfo}${rows.length?'\n\n'+rows.join('\n'):''}`,buttons);
+  await collectionScreen(env,
+    `💰 <b>${escapeHtml(collection.title)}</b>${collection.closed?' · Завершено':collection.message_id?' · Опубліковано':' · Чернетка'}\nЗібрано — <b>${progress}</b>${voteInfo}${rows.length?'\n\n'+rows.join('\n'):''}`,buttons,messageId);
 }
 
 export async function collectionCallback(env: Env, q: Callback) {
@@ -108,7 +118,7 @@ export async function collectionCallback(env: Env, q: Callback) {
   const [,action,raw,extra] = q.data.split(':');
   const page = Number(extra||0);
   if(action==='list') {
-    if(/^\d{1,5}$/.test(raw))await collectionsMenu(env,Number(raw));
+    if(/^\d{1,5}$/.test(raw))await collectionsMenu(env,Number(raw),q.message.message_id);
     return true;
   }
   if(action==='new') {
@@ -175,7 +185,7 @@ export async function collectionCallback(env: Env, q: Callback) {
     return true;
   }
   if(action==='view'&&Number.isSafeInteger(page)&&page>=0&&page<=10000) {
-    await collectionCard(env,collection,page);
+    await collectionCard(env,collection,page,q.message.message_id);
   }
   if(action==='unmatched')await unmatched(env,collection,page);
   if(action==='allocate') {
@@ -437,9 +447,11 @@ async function collectionProgress(env: Env, collection: Collection) {
     .first<{jar_id:string;balance:number;goal:number;jars:string}>();
   if(bank) {
     const jars=JSON.parse(bank.jars) as {id:string;sendId?:string}[];
+    // The API may return either a short code or a path such as jar/6eeg36jYWW.
     const sendId=jars.find(jar=>jar.id===bank.jar_id)?.sendId;
-    return {total:bank.balance,goal:bank.goal,url:collection.bank_url||(sendId&&/^[a-zA-Z0-9_-]+$/.test(sendId)
-      ?'https://send.monobank.ua/jar/'+sendId:null)};
+    const code=typeof sendId==='string'?/^(?:jar\/)?([a-zA-Z0-9_-]{1,80})$/.exec(sendId)?.[1]:undefined;
+    return {total:bank.balance,goal:bank.goal,url:collection.bank_url||(code
+      ?'https://send.monobank.ua/jar/'+code:null)};
   }
   const total=await env.HOME_DB.prepare('SELECT COALESCE(SUM(amount),0) AS amount FROM collection_totals WHERE collection_id=?')
     .bind(collection.id).first<{amount:number}>();
@@ -449,9 +461,21 @@ async function collectionProgress(env: Env, collection: Collection) {
 async function publicCollectionText(env: Env, collection: Collection) {
   const {total,goal,url}=await collectionProgress(env,collection);
   const figures:string[]=[];
-  if(collection.requested_amount!==null)figures.push(`💰 Внесок з квартири — <b>${money(collection.requested_amount)}</b>`);
+  if(collection.requested_amount!==null)figures.push(`💰 Мінімальний внесок — <b>${money(collection.requested_amount)}</b>`);
   if(goal>0)figures.push(`🎯 Ціль банки — <b>${money(goal)}</b>`);
   figures.push(`Зібрано — <b>${money(total)}</b>`);
+  if(collection.vote_poll_id!==null&&collection.vote_option_index!==null){
+    const stats=await env.HOME_DB.prepare(`SELECT COUNT(*) AS supported,
+      COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM collection_totals t
+        WHERE t.collection_id=c.id AND t.premise_id=p.id AND t.amount>0) THEN 1 ELSE 0 END),0) AS paid
+      FROM house_collections c JOIN polls poll ON poll.id=c.vote_poll_id AND poll.chat_id=c.chat_id
+      JOIN premise_votes v ON v.poll_id=poll.id AND v.option_index=c.vote_option_index
+      JOIN premises p ON p.id=v.premise_id AND p.chat_id=c.chat_id AND p.kind='apartment'
+      WHERE c.id=?`).bind(collection.id).first<{supported:number;paid:number}>();
+    const supported=stats?.supported??0;
+    const singular=supported%10===1&&supported%100!==11;
+    figures.push(`👥 Зробили внесок — <b>${stats?.paid??0} із ${supported} ${singular?'квартири':'квартир'}</b>, ${singular?'яка підтримала':'які підтримали'} збір`);
+  }
   const blocks=[`<b>${escapeHtml(collection.title)}</b>${collection.closed?' · Завершено':''}`];
   if(collection.description)blocks.push(escapeHtml(collection.description));
   blocks.push(figures.join('\n'));
@@ -527,11 +551,17 @@ async function refreshCollectionPost(env: Env, collection: Collection) {
     .bind(hash,collection.id,collection.message_id,collection.closed).run();
 }
 
-export async function refreshBankCollectionPosts(env:Env,fundId:string){
+async function refreshCollectionPosts(env:Env,field:'id'|'mono_fund_id'|'vote_poll_id',value:string|number){
   const {results}=await env.HOME_DB.prepare(`SELECT c.* FROM house_collections c JOIN groups g ON g.chat_id=c.chat_id
-    WHERE c.mono_fund_id=? AND c.closed=0 AND c.message_id IS NOT NULL
-      AND c.publish_lease_until<=unixepoch() AND g.status='approved' AND g.bot_present=1`).bind(fundId).all<Collection>();
+    WHERE c.${field}=? AND c.closed=0 AND c.message_id IS NOT NULL
+      AND c.publish_lease_until<=unixepoch() AND g.status='approved' AND g.bot_present=1`).bind(value).all<Collection>();
   for(const c of results)await refreshCollectionPost(env,c);
+}
+export function refreshBankCollectionPosts(env:Env,fundId:string){
+  return refreshCollectionPosts(env,'mono_fund_id',fundId);
+}
+export function refreshPollCollectionPosts(env:Env,pollId:number){
+  return refreshCollectionPosts(env,'vote_poll_id',pollId);
 }
 
 export async function scheduledCollections(env: Env) {
@@ -674,6 +704,7 @@ async function handleCollectionInput(env: Env, uid: number, pending: {raw:string
     return true;
   }
   await syncCollectionVotes(env,collection.id).catch(()=>console.error('Contribution vote sync deferred',collection.id));
+  await refreshCollectionPosts(env,'id',collection.id).catch(()=>console.error('Collection post update deferred',collection.id));
   await sendManualContributionReceipt(env, collection, resident, subject, amount).catch(()=>{});
   if(resident)await collectionCard(env,collection);
   else {
@@ -735,6 +766,7 @@ async function allocateBankContribution(env: Env, collectionId: number, operatio
   ]);
   if(credited.meta.changes) {
     await syncCollectionVotes(env,collectionId).catch(()=>console.error('Contribution vote sync deferred',collectionId));
+    await refreshCollectionPosts(env,'id',collectionId).catch(()=>console.error('Collection post update deferred',collectionId));
     await sendApartmentReceipt(env,operationId).catch(()=>{});
   }
 }

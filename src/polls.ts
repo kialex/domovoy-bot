@@ -68,7 +68,11 @@ export async function refreshPoll(env:Env,id:number) {
       throw error;
     }
     const latest=await env.HOME_DB.prepare('SELECT message_id,status FROM polls WHERE id=?').bind(id).first<{message_id:number;status:string}>();
-    if(!latest||(latest.message_id===poll.message_id&&latest.status===poll.status))return;
+    if(!latest||(latest.message_id===poll.message_id&&latest.status===poll.status)){
+      const {refreshPollCollectionPosts}=await import('./collections.ts');
+      await refreshPollCollectionPosts(env,id).catch(()=>console.error('Collection post update deferred for poll',id));
+      return;
+    }
   }
   throw new Error('Poll changed during refresh');
 }

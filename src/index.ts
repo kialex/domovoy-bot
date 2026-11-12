@@ -1,3 +1,4 @@
+import { residentCollectionsMenu, residentCollectionCallback } from './resident-collections.ts';
 import { scheduledCityNotices } from './city-notices.ts';
 import { adminResidentCallback, adminResidentMessage } from './admin-resident.ts';
 import { groupRequest, groupRequestCallback } from './group-requests.ts';
@@ -30,7 +31,10 @@ async function message(env: Env, m: Message, updateId: number) {
     await clearCollectionInput(env);
   }
   if (admin && (command === '/menu' || text === ADMIN_ACTIONS.menu)) {await clearMonoSetup(env);return adminMenu(env);}
-  if (admin && text === COLLECTIONS) {await clearMonoSetup(env);return collectionsMenu(env);}
+  if (text === COLLECTIONS) {
+    if(admin){await clearMonoSetup(env);return collectionsMenu(env);}
+    return residentCollectionsMenu(env,m.from.id);
+  }
   if (admin && (text === FUNDS || text === '💰 Збори коштів')) return fundsMenu(env);
   if (admin && (text === ADD_BANK || text === '➕ Додати збір')) return startMono(env);
   if (admin && (text === ADMIN_ACTIONS.polls || command === '/polls')) return adminPollList(env);
@@ -92,6 +96,7 @@ export async function handleUpdate(env: Env, update: Update) {
     if (await groupRequestCallback(env,q)) return;
     if (await monoCallback(env,q)) return;
     if (await adminResidentCallback(env,q)) return;
+    if (await residentCollectionCallback(env,q)) return;
     if (await collectionCallback(env,q)) return;
     if (await joinCallback(env,q)) return;
     if (await directoryCallback(env,q)) return;

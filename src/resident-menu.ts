@@ -6,17 +6,18 @@ import { membershipSelect, ownMemberships, premiseLabel, roleIcon, roleLabel } f
 import type { Membership } from './premises.ts';
 import { positiveId } from './validation.ts';
 import { startRegistration } from './registration.ts';
-import { residentCollectionLines } from './collections.ts';
+import { canViewCollections } from './resident-collections.ts';
+import { COLLECTIONS, residentCollectionLines } from './collections.ts';
 
 export const RESIDENT_ACTIONS = {
-  data: '👤 Мої дані', units: '🏠 Мої приміщення', polls: '🗳 Доступні голосування', add: '➕ Додати приміщення', menu: '🏠 Меню жителя',
+  data: '👤 Мої дані', units: '🏠 Мої приміщення', polls: '🗳 Доступні голосування', collections: COLLECTIONS, add: '➕ Додати приміщення', menu: '🏠 Меню жителя',
 };
-export const residentKeyboard=()=>({keyboard:[[{text:RESIDENT_ACTIONS.data},{text:RESIDENT_ACTIONS.units}],[{text:RESIDENT_ACTIONS.polls}],[{text:RESIDENT_ACTIONS.add},{text:RESIDENT_ACTIONS.menu}]],resize_keyboard:true,is_persistent:true,one_time_keyboard:false});
+export const residentKeyboard=(collections=false)=>({keyboard:[[{text:RESIDENT_ACTIONS.data},{text:RESIDENT_ACTIONS.units}],[{text:RESIDENT_ACTIONS.polls}],...(collections?[[{text:RESIDENT_ACTIONS.collections}]]:[]),[{text:RESIDENT_ACTIONS.add},{text:RESIDENT_ACTIONS.menu}]],resize_keyboard:true,is_persistent:true,one_time_keyboard:false});
 const statusLabel: Record<string,string> = { approved: '✅ Підтверджено', pending: '⏳ На перевірці', revoked: '🚫 Доступ вимкнено', rejected: 'Відхилено' };
 export async function residentMenu(env: Env, uid: number, message?:string) {
   return telegram(env,'sendMessage',{
     chat_id:uid,text:message||'🏡 Кабінет мешканця\nОберіть дію на клавіатурі внизу. Ви можете додати кілька квартир або комерційних приміщень.',
-    reply_markup:residentKeyboard(),
+    reply_markup:residentKeyboard(await canViewCollections(env,uid)),
   });
 }
 export async function showOwnData(env: Env, uid: number) {

@@ -11,7 +11,7 @@ export const COLLECTIONS = '💰 Збори';
 const PAGE_SIZE = 8;
 const premiseContributionLabel = "CASE WHEN kind='commercial' THEN business_name ELSE 'Кв. '||number END";
 const money = (amount: number) => new Intl.NumberFormat('uk-UA', {maximumFractionDigits: 2}).format(amount / 100) + ' грн';
-interface Collection { vote_poll_id: number|null; vote_option_index:number|null; id: number; title: string; chat_id: number; closed: number; mono_fund_id: string | null;
+export interface Collection { vote_poll_id: number|null; vote_option_index:number|null; id: number; title: string; chat_id: number; closed: number; mono_fund_id: string | null;
   description: string; requested_amount: number | null; bank_card: string | null; bank_url: string | null;
   message_id: number | null; published_hash: string | null; repost_interval: number;
   next_repost_at: number | null; publish_lease_until: number; previous_message_id: number | null;
@@ -458,7 +458,7 @@ async function collectionProgress(env: Env, collection: Collection) {
   return {total:total?.amount??0,goal:0,url:null};
 }
 
-async function publicCollectionText(env: Env, collection: Collection) {
+export async function publicCollectionText(env: Env, collection: Collection) {
   const {total,goal,url}=await collectionProgress(env,collection);
   const figures:string[]=[];
   if(collection.requested_amount!==null)figures.push(`💰 Мінімальний внесок — <b>${money(collection.requested_amount)}</b>`);

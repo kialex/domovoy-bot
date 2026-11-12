@@ -2095,3 +2095,87 @@ test('collection navigation edits the same private message for collection and co
     assert.equal(h.calls.some(c=>c.method==='editMessageText'||isSend(c.method)),false);
   }finally{h.close();}
 });
+
+test('registered residents see a read-only collections button and only published or completed collections of their house',async()=>{
+  const h=harness(2);try{
+    await register(h,2);await register(h,3,{approve:false});
+    await h.msg(2,'🏠 Меню жителя');
+    assert.ok(h.calls.at(-1).reply_markup.keyboard.flat().some(b=>b.text==='💰 Збори'));
+    for(const uid of [3,4]){
+      await h.msg(uid,'🏠 Меню жителя');
+      assert.equal(h.calls.at(-1).reply_markup.keyboard.flat().some(b=>b.text==='💰 Збори'),false);
+      await h.msg(uid,'💰 Збори');assert.match(h.calls.at(-1).text,/після підтвердження реєстрації/);
+    }
+    h.sqlite.exec(`INSERT INTO house_collections(id,chat_id,title,message_id) VALUES (1,-100001,'Генератор',100);
+      INSERT INTO house_collections(id,chat_id,title,closed) VALUES (2,-100001,'Акумулятори',1);
+      INSERT INTO house_collections(id,chat_id,title) VALUES (3,-100001,'Прихована чернетка');
+      INSERT INTO house_collections(id,chat_id,title,message_id) VALUES (4,-100002,'Інший будинок',200);`);
+    h.calls.length=0;await h.msg(2,'💰 Збори');
+    const list=h.calls.at(-1);
+    assert.equal(list.chat_id,2);assert.equal(list.text,'Оберіть збір.');
+    const buttons=list.reply_markup.inline_keyboard.flat();
+    assert.deepEqual(buttons.map(b=>b.callback_data),['rc:view:1:0','rc:view:2:0']);
+    assert.equal(JSON.stringify(list).includes('Прихована чернетка'),false);
+    assert.equal(JSON.stringify(list).includes('Інший будинок'),false);
+    await h.msg(1,'💰 Збори');
+    assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='hc:new'));
+  }finally{h.close();}
+});
+
+test('resident collection pages edit one message, expose only premise amounts and recheck access on every click',async()=>{
+  const h=harness(2);try{
+    await register(h,2,{number:'25',role:'tenant'});await register(h,3,{chat:-100002});
+    await register(h,4,{number:'25',role:'family'});
+    for(let i=1;i<=9;i++){
+      h.sqlite.prepare("INSERT INTO house_collections(id,chat_id,title,requested_amount,message_id) VALUES (?,-100001,?,200000,?)").run(i,'Збір '+i,100+i);
+      const p=h.sqlite.prepare("INSERT INTO premises(chat_id,kind,number,number_start,number_end) VALUES (-100001,'apartment',?,?,?)").run(String(i),i,i);
+      h.sqlite.prepare('INSERT INTO collection_totals(collection_id,premise_id,amount) VALUES (1,?,200000)').run(p.lastInsertRowid);
+    }
+    const profile=h.sqlite.prepare('SELECT id FROM profiles WHERE user_id=2').get();
+    h.sqlite.prepare('INSERT INTO collection_totals(collection_id,profile_id,amount) VALUES (1,?,100000)').run(profile.id);
+    const target={message_id:777,chat:{id:222222,type:'private'}};
+    h.calls.length=0;await h.cb(2,'rc:list:1',target);await h.cb(2,'rc:list:0',target);
+    await h.cb(2,'rc:view:1:0',target);
+    let view=h.calls.filter(c=>c.method==='editMessageText').at(-1);
+    assert.match(view.text,/Зараховані внески/);assert.match(view.text,/Кв\. 1 — <b>2\s000 грн/);
+    assert.doesNotMatch(view.text,/Кв\. 9 —|Person|380|Налаштування|За внеском:/);
+    assert.ok(view.reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='rc:view:1:1'));
+    await h.cb(2,'rc:view:1:1',target);
+    view=h.calls.filter(c=>c.method==='editMessageText').at(-1);
+    assert.match(view.text,/Кв\. 9 —/);assert.doesNotMatch(view.text,/Кв\. 1 —/);
+    assert.equal(view.link_preview_options.is_disabled,true);
+    assert.equal(h.calls.some(c=>isSend(c.method)),false);
+    assert.ok(h.calls.filter(c=>c.method==='editMessageText').every(c=>c.chat_id===222222&&c.message_id===777));
+    assert.ok(view.reply_markup.inline_keyboard.flat().every(b=>b.callback_data.startsWith('rc:')));
+    await h.cb(4,'rc:view:1:0');assert.match(h.calls.at(-1).text,/Збір 1/,'Family members also have read access');
+    await h.cb(3,'rc:view:1:0');assert.equal(h.calls.at(-1).text,'Збір недоступний.');
+    h.sqlite.prepare("UPDATE memberships SET status='revoked' WHERE user_id=2").run();
+    await h.cb(2,'rc:view:1:0',target);assert.equal(h.calls.at(-1).text,'Збір недоступний.');
+    await h.cb(2,'rc:list:0',target);assert.match(h.calls.at(-1).text,/після підтвердження реєстрації/);
+    h.sqlite.exec("UPDATE groups SET status='disconnected' WHERE chat_id=-100001");
+    await h.cb(4,'rc:view:1:0');assert.equal(h.calls.at(-1).text,'Збір недоступний.');
+  }finally{h.close();}
+});
+
+test('residents cannot mutate collections through forged administrative callbacks or read draft and foreign records',async()=>{
+  const h=harness(2);try{
+    await register(h,2);
+    h.sqlite.exec(`INSERT INTO house_collections(id,chat_id,title,requested_amount,message_id) VALUES (1,-100001,'Генератор',200000,100);
+      INSERT INTO house_collections(id,chat_id,title) VALUES (2,-100001,'Чернетка');
+      INSERT INTO house_collections(id,chat_id,title,message_id) VALUES (3,-100002,'Чужий збір',200);`);
+    const snapshot=()=>JSON.stringify({collections:h.sqlite.prepare('SELECT * FROM house_collections').all(),
+      totals:h.sqlite.prepare('SELECT * FROM collection_totals').all()});
+    const before=snapshot();
+    for(const data of ['hc:new','hc:close:1','hc:requested:1','hc:add:1','hc:link:1:fake','hc:pollchoice:1:1:0',
+      'hc:confirm:1:3600','rc:close:1','rc:add:1','rc:new','rc:view:1:0:extra']){
+      h.calls.length=0;await h.cb(2,data);
+      assert.equal(snapshot(),before,data);
+      assert.equal(h.calls.some(c=>isSend(c.method)||c.method==='editMessageText'),false,data);
+    }
+    for(const id of [2,3]){
+      await h.cb(2,`rc:view:${id}:0`);assert.equal(h.calls.at(-1).text,'Збір недоступний.');
+    }
+    h.calls.length=0;await h.cb(2,'rc:view:1:0',{message_id:777,chat:{id:-100001,type:'supergroup'}});
+    assert.equal(h.calls.some(c=>isSend(c.method)||c.method==='editMessageText'),false);
+  }finally{h.close();}
+});

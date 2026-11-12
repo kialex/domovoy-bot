@@ -15,7 +15,7 @@ export async function welcomeJoined(env:Env,uid:number,chat:number) {
  const row=await env.HOME_DB.prepare('SELECT token FROM join_requests WHERE user_id=? AND chat_id=?').bind(uid,chat).first<{token:string}>();
  if(!row)return;
  try{
-  await telegram(env,'sendMessage',{chat_id:uid,text:`🏡 Вітаємо у «${group.title}»!\n\nТут можна голосувати, переглядати свої дані та мешканців квартири, додавати інші приміщення.\n\nКнопки — внизу чату.`,...(String(uid)===env.ADMIN_TELEGRAM_USER_ID?{}:{reply_markup:residentKeyboard()})});
+  await telegram(env,'sendMessage',{chat_id:uid,text:`🏡 Вітаємо у «${group.title}»!\n\nТут можна голосувати, переглядати свої дані та мешканців квартири, додавати інші приміщення.\n\nКнопки — внизу чату.`,...(String(uid)===env.ADMIN_TELEGRAM_USER_ID?{}:{reply_markup:residentKeyboard(true)})});
   await env.HOME_DB.prepare('UPDATE join_requests SET welcomed=1 WHERE token=?').bind(row.token).run();
  }catch{console.error('Join welcome deferred');}
  finally{await env.HOME_DB.prepare('UPDATE join_requests SET welcome_lease_until=NULL WHERE token=?').bind(row.token).run();}

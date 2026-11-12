@@ -61,6 +61,27 @@ async function publicVoters(env:Env,c:RequestContext,pollId:number,kind:PollRequ
     for(const unit of g.units){const label=escapeHtml(unit);if(line.length+label.length+2>3000){blocks.push(line);line=prefix;}line+=(line===prefix?'':', ')+label;}
     blocks.push(line);
   }
+  if(kind==='report') {
+    const {results:paid}=await env.HOME_DB.prepare(`SELECT DISTINCT p.id,p.kind,p.number,p.number_start,p.business_name
+      FROM house_collections c JOIN collection_totals t ON t.collection_id=c.id
+      JOIN premises p ON p.id=t.premise_id AND p.chat_id=c.chat_id
+      WHERE c.vote_poll_id=? AND c.chat_id=? AND t.amount>0
+      ORDER BY p.kind,p.number_start,p.number,p.business_name`).bind(pollId,c.chat_id)
+      .all<{id:number;kind:string;number:string;number_start:number;business_name:string}>();
+    if(paid.length) {
+      const prefix='💰 <b>Здали завчасно:</b> ';
+      let line=prefix;
+      for(const premise of paid) {
+        const label=escapeHtml(premise.kind==='commercial'?premise.business_name||'Комерція':premise.number);
+        if(line.length+label.length+2>3000) {
+          blocks.push(line);
+          line=prefix;
+        }
+        line+=(line===prefix?'':', ')+label;
+      }
+      blocks.push('',line);
+    }
+  }
   let text='';for(const block of blocks){if(text.length+block.length+2>3800){await reply(env,c,text);text='';}text+=(text?'\n':'')+block;}
   return reply(env,c,text);
 }

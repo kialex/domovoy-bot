@@ -1811,6 +1811,10 @@ test('collection creation optionally links a same-house poll and fills only miss
     assert.equal(h.sqlite.prepare('SELECT option_index FROM premise_votes WHERE premise_id=?').get(a.premise_id).option_index,0);
     await h.cb(1,`pollctl:results:${p.id}`);
     assert.match(h.calls.at(-1).text,/25 \(за внеском\)/);
+    await h.cb(2,`gv:report:${p.id}`,groupMessage(p));
+    assert.match(h.calls.at(-1).text,/Здали завчасно:<\/b> 25, 26, Shop/);
+    await h.cb(2,`gv:pick:${p.id}`,groupMessage(p));
+    assert.doesNotMatch(h.calls.at(-1).text,/Здали завчасно/);
     await h.cb(1,`hc:settings:${c.id}`);
     assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.text==='Пов’язане голосування'));
     await h.cb(1,`hc:nopoll:${c.id}`);

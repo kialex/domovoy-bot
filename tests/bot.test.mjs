@@ -1765,3 +1765,88 @@ test('1562 seeds old notices, publishes new IDs and replies when the end time mo
     assert.equal(requests,stopped);
   } finally {h.close();}
 });
+
+test('collection creation optionally links a same-house poll and fills only missing premise votes',async()=>{
+  const h=harness(2);
+  try {
+    const a=await register(h,2);
+    const b=await register(h,3,{number:'26'});
+    const business=await register(h,4,{kind:'commercial',business:'Shop'});
+    const p=await poll(h);
+    await cast(h,3,p,1);
+    await h.cb(1,'hc:house:-100001');
+    await h.msg(1,'Генератор');
+    const c=h.sqlite.prepare('SELECT id FROM house_collections').get();
+    await h.msg(1,'Опис');
+    await h.msg(1,'2000');
+    assert.match(h.calls.at(-1).text,/Яке голосування прив’язати до збору/);
+    assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.text==='Пропустити'));
+    h.sqlite.prepare('INSERT INTO collection_totals(collection_id,premise_id,amount) VALUES (?,?,200000)').run(c.id,a.premise_id);
+    await h.cb(2,`hc:pollchoice:${c.id}:${p.id}:0`);
+    assert.equal(h.sqlite.prepare('SELECT vote_poll_id FROM house_collections').get().vote_poll_id,null);
+    await h.cb(1,`hc:pollpick:${c.id}:${p.id}:setup`);
+    assert.match(h.calls.at(-1).text,/Яку відповідь/);
+    h.fail='editMessageText';
+    await h.cb(1,`hc:pollchoice:${c.id}:${p.id}:0:setup`);
+    assert.match(h.calls.at(-1).text,/Як часто піднімати/);
+    h.fail=null;
+    const beforeRepair=h.calls.length;
+    await scheduledCollections(h.env);
+    assert.ok(h.calls.slice(beforeRepair).some(call=>call.method==='editMessageText' && call.message_id===p.message_id));
+    assert.equal(h.sqlite.prepare('SELECT vote_poll_id FROM house_collections').get().vote_poll_id,p.id);
+    let automatic=h.sqlite.prepare('SELECT * FROM premise_votes WHERE premise_id=?').get(a.premise_id);
+    assert.equal(automatic.user_id,0);
+    assert.equal(automatic.option_index,0);
+    assert.equal(automatic.voter_role,'contribution');
+    for(const premise of [b,business]) {
+      await h.cb(1,`hc:apartment:${c.id}:${premise.premise_id}`);
+      await h.msg(1,'2000');
+      await h.post(h.lastUpdate);
+    }
+    assert.equal(h.sqlite.prepare('SELECT option_index FROM premise_votes WHERE premise_id=?').get(b.premise_id).option_index,1);
+    assert.equal(h.sqlite.prepare('SELECT voter_role FROM premise_votes WHERE premise_id=?').get(business.premise_id).voter_role,'contribution');
+    assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM premise_votes WHERE poll_id=?').get(p.id).n,3);
+    await cast(h,2,p,1);
+    assert.ok(h.calls.some(c=>c.text?.includes('зараховано автоматично за внеском')));
+    assert.equal(h.sqlite.prepare('SELECT option_index FROM premise_votes WHERE premise_id=?').get(a.premise_id).option_index,0);
+    await h.cb(1,`pollctl:results:${p.id}`);
+    assert.match(h.calls.at(-1).text,/25 \(за внеском\)/);
+    await h.cb(1,`hc:settings:${c.id}`);
+    assert.ok(h.calls.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.text==='Пов’язане голосування'));
+    await h.cb(1,`hc:nopoll:${c.id}`);
+    assert.equal(h.sqlite.prepare('SELECT vote_poll_id FROM house_collections').get().vote_poll_id,null);
+    assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM premise_votes').get().n,3);
+  } finally {h.close();}
+});
+
+test('linked collection bank credits cannot duplicate, cross houses or add votes to expired polls',async()=>{
+  const h=harness(2);
+  try {
+    const a=await register(h,2,{number:'84А'});
+    const b=await register(h,3,{number:'84А',chat:-100002});
+    const p=await poll(h);
+    const now=Math.floor(Date.now()/1000);
+    h.sqlite.exec(`INSERT INTO mono_connections(id,token_fingerprint,token_cipher,jars) VALUES ('conn','fp','cipher','[]');
+      INSERT INTO mono_funds(id,connection_id,jar_id,chat_id,group_version,title,balance,deposits,daily,goal_notice,started_at,checked_at)
+      VALUES ('fund','conn','jar',-100001,1,'Jar',0,1,0,0,${now-100},0);
+      INSERT INTO house_collections(id,chat_id,title,mono_fund_id,bank_linked_at,vote_poll_id,vote_option_index)
+      VALUES (1,-100001,'Generator','fund',${now-100},${p.id},1);`);
+    const operation={id:'bank-vote',time:now,amount:200000,comment:'кв 84а'};
+    await recordBankContribution(h.env,'fund',operation);
+    await recordBankContribution(h.env,'fund',operation);
+    const votes=currentVotes(h);
+    assert.equal(votes.length,1);
+    assert.equal(votes[0].premise_id,a.premise_id);
+    assert.equal(votes[0].option_index,1);
+    assert.notEqual(votes[0].premise_id,b.premise_id);
+    await h.cb(1,'hc:house:-100002');await h.msg(1,'Other');
+    const other=h.sqlite.prepare('SELECT id FROM house_collections WHERE chat_id=-100002').get();
+    await h.cb(1,`hc:pollchoice:${other.id}:${p.id}:0`);
+    assert.equal(h.sqlite.prepare('SELECT vote_poll_id FROM house_collections WHERE id=?').get(other.id).vote_poll_id,null);
+    const next=await register(h,5,{number:'85',floor:'1'});
+    h.sqlite.prepare('UPDATE polls SET ends_at=? WHERE id=?').run(now-1,p.id);
+    await h.cb(1,`hc:apartment:1:${next.premise_id}`);await h.msg(1,'2000');
+    assert.equal(currentVotes(h).length,1);
+    assert.equal(h.sqlite.prepare('SELECT amount FROM collection_totals WHERE premise_id=?').get(next.premise_id).amount,200000);
+  } finally {h.close();}
+});

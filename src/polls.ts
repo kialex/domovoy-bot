@@ -82,6 +82,7 @@ function castStatement(env:Env,poll:Poll,uid:number,premiseId:number,option:numb
     WHERE premise_votes.user_id=excluded.user_id AND premise_votes.option_index<>excluded.option_index`).bind(option,poll.id,premiseId,uid);
 }
 function voterLabel(name:string, role:string) {
+  if(role==='contribution')return 'Зараховано за внеском';
   return `${name || 'Мешканець'} · ${['owner','tenant','family'].includes(role) ? roleLabel(role) : 'мешканець'}`;
 }
 async function alreadyVoted(env:Env,uid:number,pollId:number,premiseId:number) {
@@ -91,6 +92,7 @@ async function alreadyVoted(env:Env,uid:number,pollId:number,premiseId:number) {
     WHERE v.poll_id=? AND v.premise_id=? AND viewer.user_id=? AND viewer.status='approved' AND g.status='approved' AND g.bot_present=1`)
     .bind(pollId,premiseId,uid).first<{user_id:number;option_index:number;voter_name:string;voter_role:string;options:string}>();
   if (!old) return 'Голосування недоступне або ваш доступ змінився.';
+  if(old.voter_role==='contribution')return `Голос за «${(JSON.parse(old.options) as string[])[old.option_index]}» зараховано автоматично за внеском приміщення.`;
   if(old.user_id===uid)return `Ви вже проголосували за «${(JSON.parse(old.options) as string[])[old.option_index]}». Якщо хочете змінити голос, оберіть іншу відповідь.`;
   const role = ['owner','tenant','family'].includes(old.voter_role) ? roleLabel(old.voter_role) : 'мешканець';
   const suffix = ` · ${role}\nЯкщо ваші думки не збігаються, зверніться до цієї людини та попросіть змінити свій голос.`;
@@ -116,7 +118,7 @@ export async function openVoteIntent(env:Env,uid:number,token:string,page=0,rece
   const byId=new Map(votes.map(v=>[v.premise_id,v]));
   const buttons:Button[][]=units.slice(page*8,page*8+8).map(p=>{
     const old=byId.get(p.id);
-    return [{text:`${old?(old.user_id===uid?'✅':'🔒'):'🏠'} ${premiseLabel(p)}`,callback_data:`cast:${token}:${p.id}`}];
+    return [{text:`${old?(old.voter_role==='contribution'?'💰':old.user_id===uid?'✅':'🔒'):'🏠'} ${premiseLabel(p)}`,callback_data:`cast:${token}:${p.id}`}];
   });
   const navigation=[];
   if(page>0)navigation.push({text:'← Назад',callback_data:`vp:${token}:${page-1}`});
@@ -126,7 +128,7 @@ export async function openVoteIntent(env:Env,uid:number,token:string,page=0,rece
   const link=poll.message_id?pollLink(poll.chat_id,poll.message_id):null;
   if(link&&votes.some(v=>v.user_id===uid))buttons.unshift([{text:'↗️ Повернутися до голосування',url:link}]);
   const authors=units.slice(page*8,page*8+8).flatMap(p=>{const old=byId.get(p.id);return old?[`${premiseLabel(p)}: ${voterLabel(old.voter_name,old.voter_role)}`]:[];});
-  return sendHtml(env,uid,`${receipt?escapeHtml(receipt)+'\n\n':''}🗳 <b>Від якого приміщення голосуємо?</b>\n\n${escapeHtml(poll.question)}\nВаш вибір: <b>${escapeHtml(options[intent.option_index])}</b>\n\nОберіть приміщення нижче.\n✅ — ваш голос: його можна змінити.\n🔒 — голос іншого мешканця: змінити його може лише автор.${authors.length ? `\n\nХто проголосував:\n${escapeHtml(authors.join('\n'))}` : ''}`,buttons);
+  return sendHtml(env,uid,`${receipt?escapeHtml(receipt)+'\n\n':''}🗳 <b>Від якого приміщення голосуємо?</b>\n\n${escapeHtml(poll.question)}\nВаш вибір: <b>${escapeHtml(options[intent.option_index])}</b>\n\nОберіть приміщення нижче.\n✅ — ваш голос: його можна змінити.\n🔒 — голос іншого мешканця: змінити його може лише автор.${votes.some(v=>v.voter_role==='contribution')?'\n💰 — голос зараховано за внеском приміщення.':''}${authors.length ? `\n\nХто проголосував:\n${escapeHtml(authors.join('\n'))}` : ''}`,buttons);
 }
 export async function vote(env: Env, query: Callback) {
   const [,rawId,rawOption]=(query.data||'').split(':');

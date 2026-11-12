@@ -1,3 +1,4 @@
+import { syncCollectionVotes } from './collection-votes.ts';
 import { residentTree } from './resident-tree.ts';
 import type { Button, Callback, Env, Message } from './env.ts';
 import { connectedGroups, getGroup, groupId, isConnected } from './groups.ts';
@@ -10,7 +11,7 @@ export const COLLECTIONS = '💰 Збори';
 const PAGE_SIZE = 8;
 const premiseContributionLabel = "CASE WHEN kind='commercial' THEN business_name ELSE 'Кв. '||number END";
 const money = (amount: number) => new Intl.NumberFormat('uk-UA', {maximumFractionDigits: 2}).format(amount / 100) + ' грн';
-interface Collection { id: number; title: string; chat_id: number; closed: number; mono_fund_id: string | null;
+interface Collection { vote_poll_id: number|null; vote_option_index:number|null; id: number; title: string; chat_id: number; closed: number; mono_fund_id: string | null;
   description: string; requested_amount: number | null; bank_card: string | null; bank_url: string | null;
   message_id: number | null; published_hash: string | null; repost_interval: number;
   next_repost_at: number | null; publish_lease_until: number; previous_message_id: number | null;
@@ -85,6 +86,9 @@ async function collectionCard(env: Env, collection: Collection, page = 0) {
     buttons.push(button('Налаштування збору',`hc:settings:${collection.id}`));
   }
   buttons.push(button('Зарахувати внесок',`hc:add:${collection.id}`));
+  const linkedPoll=collection.vote_poll_id ? await env.HOME_DB.prepare('SELECT question,options FROM polls WHERE id=? AND chat_id=?')
+    .bind(collection.vote_poll_id,collection.chat_id).first<{question:string;options:string}>() : null;
+  const voteInfo=linkedPoll ? `\n🗳 ${escapeHtml(linkedPoll.question)}\nЗа внеском: ${escapeHtml((JSON.parse(linkedPoll.options) as string[])[collection.vote_option_index!] ?? '')}` : '';
   const {total,goal}=await collectionProgress(env,collection);
   const progress=money(total)+(goal>0?' із '+money(goal):'');
   const pending = collection.mono_fund_id || await env.HOME_DB.prepare(
@@ -94,7 +98,7 @@ async function collectionCard(env: Env, collection: Collection, page = 0) {
   if(page>0)buttons.push(button('← Назад',`hc:view:${collection.id}:${page-1}`));
   if(results.length>PAGE_SIZE)buttons.push(button('Далі →',`hc:view:${collection.id}:${page+1}`));
   await sendHtml(env,env.ADMIN_TELEGRAM_USER_ID,
-    `💰 <b>${escapeHtml(collection.title)}</b>${collection.closed?' · Завершено':collection.message_id?' · Опубліковано':' · Чернетка'}\nЗібрано — <b>${progress}</b>${rows.length?'\n\n'+rows.join('\n'):''}`,buttons);
+    `💰 <b>${escapeHtml(collection.title)}</b>${collection.closed?' · Завершено':collection.message_id?' · Опубліковано':' · Чернетка'}\nЗібрано — <b>${progress}</b>${voteInfo}${rows.length?'\n\n'+rows.join('\n'):''}`,buttons);
 }
 
 export async function collectionCallback(env: Env, q: Callback) {
@@ -147,10 +151,14 @@ export async function collectionCallback(env: Env, q: Callback) {
   const id=positiveId(raw);
   const collection=id&&await findCollection(env,id);
   if(!collection)return true;
+  if(['polls','pollpick','pollchoice','nopoll'].includes(action)) {
+    await collectionPollAction(env,collection,action,q.data.split(':').slice(3));
+    return true;
+  }
   if(action==='settings'&&!collection.closed) {
     await send(env,q.from.id,`Налаштування «${collection.title}»`,[
       button('Змінити опис',`hc:description:${id}`),button('Змінити внесок з квартири',`hc:requested:${id}`),
-      button('Обрати банку',`hc:banks:${id}`),
+      button('Обрати банку',`hc:banks:${id}`),button('Пов’язане голосування',`hc:polls:${id}:0`),
       ...(collection.mono_fund_id?[button('Посилання на банку',`hc:bank_url:${id}`),button('Номер картки банки',`hc:card:${id}`)]:[]),
       ...(collection.message_id?[button('Частота підняття',`hc:publish:${id}`)]:[]),
       button('Зарахувати внесок мешканцю',`hc:personadd:${id}`),
@@ -264,6 +272,58 @@ export async function collectionCallback(env: Env, q: Callback) {
     } else await collectionCard(env,saved);
   }
   return true;
+}
+
+interface CollectionPoll {id:number;question:string;options:string}
+
+async function chooseCollectionPoll(env: Env, collection: Collection, page=0, guided=false) {
+  if(!Number.isSafeInteger(page)||page<0||page>10000||collection.closed)return;
+  const {results}=await env.HOME_DB.prepare(`SELECT p.id,p.question,p.options FROM polls p
+    WHERE p.chat_id=? AND p.status='open' AND (p.ends_at IS NULL OR p.ends_at>unixepoch())
+    AND NOT EXISTS (SELECT 1 FROM house_collections c WHERE c.vote_poll_id=p.id AND c.id<>?)
+    ORDER BY p.id DESC LIMIT ? OFFSET ?`).bind(collection.chat_id,collection.id,PAGE_SIZE+1,page*PAGE_SIZE).all<CollectionPoll>();
+  if(guided&&!results.length&&page===0)return chooseCollectionBank(env,collection,true);
+  const suffix=guided?':setup':'';
+  const buttons=results.slice(0,PAGE_SIZE).map(p=>button(p.question.slice(0,60),`hc:pollpick:${collection.id}:${p.id}${suffix}`));
+  if(page>0)buttons.push(button('← Назад',`hc:polls:${collection.id}:${page-1}${suffix}`));
+  if(results.length>PAGE_SIZE)buttons.push(button('Далі →',`hc:polls:${collection.id}:${page+1}${suffix}`));
+  buttons.push(button(guided?'Пропустити':'Без голосування',`hc:nopoll:${collection.id}${suffix}`));
+  await send(env,env.ADMIN_TELEGRAM_USER_ID,
+    'Яке голосування прив’язати до збору?\nВнесок додасть голос лише від приміщення, яке ще не голосувало. Врахуємо також уже зараховані внески.',buttons);
+}
+
+async function collectionPollAction(env: Env, collection: Collection, action: string, args: string[]) {
+  if(collection.closed)return;
+  const guided=args.at(-1)==='setup';
+  if(action==='polls')return chooseCollectionPoll(env,collection,Number(args[0]||0),guided);
+  if(action==='nopoll') {
+    await env.HOME_DB.prepare('UPDATE house_collections SET vote_poll_id=NULL,vote_option_index=NULL WHERE id=? AND closed=0')
+      .bind(collection.id).run();
+    return guided?chooseCollectionBank(env,collection,true):collectionCard(env,{...collection,vote_poll_id:null,vote_option_index:null});
+  }
+  const pollId=positiveId(args[0]);
+  if(!pollId)return;
+  const poll=await env.HOME_DB.prepare(`SELECT id,question,options FROM polls WHERE id=? AND chat_id=?
+    AND status='open' AND (ends_at IS NULL OR ends_at>unixepoch())`).bind(pollId,collection.chat_id).first<CollectionPoll>();
+  if(!poll)return send(env,env.ADMIN_TELEGRAM_USER_ID,'Голосування вже недоступне.');
+  const options=JSON.parse(poll.options) as string[];
+  if(action==='pollpick') {
+    return send(env,env.ADMIN_TELEGRAM_USER_ID,`${poll.question}\nЯку відповідь зараховувати за внесок?`,[
+      ...options.map((option,index)=>button(option.slice(0,60),`hc:pollchoice:${collection.id}:${poll.id}:${index}${guided?':setup':''}`)),
+      button('Обрати інше голосування',`hc:polls:${collection.id}:0${guided?':setup':''}`),
+    ]);
+  }
+  const index=Number(args[1]);
+  if(!/^\d+$/.test(args[1]||'')||!Number.isInteger(index)||index<0||index>=options.length)return;
+  const changed=await env.HOME_DB.prepare(`UPDATE house_collections SET vote_poll_id=?,vote_option_index=?
+    WHERE id=? AND closed=0 AND EXISTS (SELECT 1 FROM polls p WHERE p.id=? AND p.chat_id=house_collections.chat_id
+      AND p.status='open' AND (p.ends_at IS NULL OR p.ends_at>unixepoch()))
+    AND NOT EXISTS (SELECT 1 FROM house_collections other WHERE other.vote_poll_id=? AND other.id<>?)`)
+    .bind(poll.id,index,collection.id,poll.id,poll.id,collection.id).run();
+  if(!changed.meta.changes)return send(env,env.ADMIN_TELEGRAM_USER_ID,'Голосування вже прив’язано до іншого збору або завершено.');
+  await syncCollectionVotes(env,collection.id).catch(()=>console.error('Contribution vote sync deferred',collection.id));
+  const saved=await findCollection(env,collection.id);
+  if(saved)return guided?chooseCollectionBank(env,saved,true):collectionCard(env,saved);
 }
 
 async function premiseCollections(env: Env, premiseId: number, action: 'unit'|'history', page: number) {
@@ -468,6 +528,11 @@ async function refreshCollectionPost(env: Env, collection: Collection) {
 }
 
 export async function scheduledCollections(env: Env) {
+  const linked=await env.HOME_DB.prepare(`SELECT c.id FROM house_collections c JOIN polls p ON p.id=c.vote_poll_id
+    WHERE p.status='open' AND (p.ends_at IS NULL OR p.ends_at>unixepoch())`).all<{id:number}>();
+  for(const {id} of linked.results) {
+    await syncCollectionVotes(env,id,true).catch(()=>console.error('Contribution vote sync deferred',id));
+  }
   const {results}=await env.HOME_DB.prepare(`SELECT c.* FROM house_collections c JOIN groups g ON g.chat_id=c.chat_id
     WHERE c.message_id IS NOT NULL AND g.status='approved' AND g.bot_present=1
       AND (c.closed=0 OR c.published_hash IS NULL OR c.previous_message_id IS NOT NULL)`).all<Collection>();
@@ -551,7 +616,7 @@ async function handleCollectionInput(env: Env, uid: number, pending: {raw:string
     if(!saved)return true;
     if(!current.guided)await collectionCard(env,saved);
     else if(step==='description')await askCollectionInput(env,'requested',saved.id,'Скільки має внести одна квартира? Напишіть суму в гривнях.',0,true);
-    else if(step==='requested')await chooseCollectionBank(env,saved,true);
+    else if(step==='requested')await chooseCollectionPoll(env,saved,0,true);
     else if(step==='bank_url')await askCollectionCardNumber(env,saved);
     else await chooseCollectionInterval(env,saved);
     return true;
@@ -601,6 +666,7 @@ async function handleCollectionInput(env: Env, uid: number, pending: {raw:string
     await send(env,uid,'Не вдалося зарахувати внесок.');
     return true;
   }
+  await syncCollectionVotes(env,collection.id).catch(()=>console.error('Contribution vote sync deferred',collection.id));
   await sendManualContributionReceipt(env, collection, resident, subject, amount).catch(()=>{});
   if(resident)await collectionCard(env,collection);
   else {
@@ -660,7 +726,10 @@ async function allocateBankContribution(env: Env, collectionId: number, operatio
     env.HOME_DB.prepare(`UPDATE mono_operations SET credited_premise_id=?
       WHERE rowid=? AND collection_id=? AND credited_premise_id IS NULL AND amount>0`).bind(premiseId,operationId,collectionId),
   ]);
-  if(credited.meta.changes)await sendApartmentReceipt(env,operationId).catch(()=>{});
+  if(credited.meta.changes) {
+    await syncCollectionVotes(env,collectionId).catch(()=>console.error('Contribution vote sync deferred',collectionId));
+    await sendApartmentReceipt(env,operationId).catch(()=>{});
+  }
 }
 
 export async function residentCollectionLines(env: Env, uid: number) {
@@ -719,6 +788,10 @@ export async function recordBankContribution(env: Env, fundId: string, operation
     .bind(operation.id,operation.time,operation.amount,comment||null,operation.time,operation.amount,number,fundId));
   const inserted = (await env.HOME_DB.batch(statements)).at(-1);
   if(number && operation.amount>0 && inserted?.meta.changes && inserted.meta.last_row_id) {
+    const linked=await env.HOME_DB.prepare('SELECT collection_id FROM mono_operations WHERE rowid=?')
+      .bind(inserted.meta.last_row_id).first<{collection_id:number|null}>();
+    if(linked?.collection_id)await syncCollectionVotes(env,linked.collection_id)
+      .catch(()=>console.error('Contribution vote sync deferred',linked.collection_id));
     await sendApartmentReceipt(env,inserted.meta.last_row_id).catch(()=>{});
   }
 }

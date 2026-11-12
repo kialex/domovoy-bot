@@ -1,5 +1,5 @@
 import type { Button, Callback, Env, Message } from './env.ts';
-import { recordBankContribution } from './collections.ts';
+import { recordBankContribution, refreshBankCollectionPosts } from './collections.ts';
 import { connectedGroups, getGroup, isConnected } from './groups.ts';
 import { escapeHtml } from './presentation.ts';
 import { answer, send, sendHtml, telegram } from './telegram.ts';
@@ -11,8 +11,8 @@ const id=()=>crypto.randomUUID().replace(/-/g,'').slice(0,12);
 const money=(n:number)=>new Intl.NumberFormat('uk-UA',{maximumFractionDigits:2}).format(n/100)+' ₴';
 interface Jar {id:string;title:string;balance:number;goal?:number;currencyCode:number;sendId?:string}
 interface Setup {nonce:string;step:string;connection_id:string|null;jar_id:string|null;chat_id:number|null;deposits:number;daily:number;goal_notice:number;expires_at:number}
-interface Connection {id:string;token_cipher:string;jars:string;last_request_at:number}
-interface Fund {id:string;connection_id:string;jar_id:string;chat_id:number;group_version:number;title:string;balance:number;goal:number;active:number;deposits:number;daily:number;goal_notice:number;started_at:number;checked_at:number;goal_sent:number;error:string}
+interface Connection {id:string;token_cipher:string;jars:string;last_request_at:number;webhook_url:string;webhook_attempted_at:number;webhook_registered_at:number}
+interface Fund {id:string;connection_id:string;jar_id:string;chat_id:number;group_version:number;title:string;balance:number;goal:number;active:number;deposits:number;daily:number;goal_notice:number;started_at:number;checked_at:number;balance_updated_at:number;goal_sent:number;error:string}
 interface Operation {id:string;time:number;amount:number;balance:number;hold:boolean;comment?:string}
 async function key(env:Env){
   if(!env.MONOBANK_ENCRYPTION_KEY)throw new Error('Monobank key missing');
@@ -27,9 +27,9 @@ async function decrypt(env:Env,cipher:string){
   const bytes=Uint8Array.from(atob(cipher),c=>c.charCodeAt(0));
   return new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:bytes.slice(0,12)},await key(env),bytes.slice(12)));
 }
-async function api<T>(token:string,path:string):Promise<T>{
+async function api<T>(token:string,path:string,body?:object):Promise<T>{
   let r:Response;
-  try{r=await fetch('https://api.monobank.ua/personal/'+path,{headers:{'X-Token':token},signal:AbortSignal.timeout(10000)});}catch{throw new Error('Mono unavailable');}
+  try{r=await fetch('https://api.monobank.ua/personal/'+path,{method:body?'POST':'GET',headers:{'X-Token':token,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(10000)});}catch{throw new Error('Mono unavailable');}
   if(!r.ok)throw new Error(r.status===401||r.status===403?'Mono access denied':r.status===429?'Mono rate limit':'Mono unavailable');
   return r.json() as Promise<T>;
 }
@@ -153,23 +153,106 @@ export async function monoCallback(env:Env,q:Callback){
     const j=await chosenJar(env,s);if(!j)return true;
     const g=s.chat_id?await getGroup(env,s.chat_id):null;
     const examples=[s.deposits?depositText(j.title,240000,j.balance,j.goal||0):'',s.daily?dailyText(j.title,240000,j.balance,j.goal||0):'',s.goal_notice?goalText(j.title,j.goal||j.balance,j.goal||0):''].filter(Boolean);
-    await sendHtml(env,q.from.id,`Група: ${escapeHtml(g?.title||'')}\n\n${examples.join('\n\n')}\n\nПеревірка — кожні 5 хвилин. Щоденний підсумок — о 20:00 за Києвом.`,[[{text:'Зберегти й увімкнути',callback_data:`mono:save:${nonce}`}]]);return true;
+    await sendHtml(env,q.from.id,`Група: ${escapeHtml(g?.title||'')}\n\n${examples.join('\n\n')}\n\nПоповнення надходять автоматично. Щоденний підсумок — о 20:00 за Києвом.`,[[{text:'Зберегти й увімкнути',callback_data:`mono:save:${nonce}`}]]);return true;
   }else if(action==='save'&&s.step==='settings'){
     const j=await chosenJar(env,s);const g=s.chat_id?await getGroup(env,s.chat_id):null;
     if(!j||!isConnected(g)||(!s.deposits&&!s.daily&&!s.goal_notice))return true;
     await env.HOME_DB.prepare(`INSERT INTO mono_funds(id,connection_id,jar_id,chat_id,group_version,title,balance,goal,deposits,daily,goal_notice,started_at,checked_at,goal_sent) VALUES (?,?,?,?,?,?,?,?,?,?,?,unixepoch(),unixepoch(),?) ON CONFLICT(connection_id,jar_id) DO UPDATE SET chat_id=excluded.chat_id,group_version=excluded.group_version,deposits=excluded.deposits,daily=excluded.daily,goal_notice=excluded.goal_notice,active=1`).bind(id(),s.connection_id,s.jar_id,s.chat_id,g!.version,j.title,j.balance,j.goal||0,s.deposits,s.daily,s.goal_notice,j.goal&&j.balance>=j.goal?1:0).run();
+    try{await registerMonoWebhook(env,s.connection_id!);}catch{
+      await send(env,q.from.id,'Банку збережено. Автоматичне підключення повідомлень повторимо. Поки перевіряємо виписку.');
+    }
     await clearMonoSetup(env);await send(env,q.from.id,`Банку «${j.title}» підключено. Нові поповнення відстежуємо відтепер.`);await fundsMenu(env);return true;
   }else return true;
   await send(env,q.from.id,'Які повідомлення надсилати?',settingsButtons(s));return true;
 }
 const dateKyiv=(time:number)=>new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Kyiv',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(time*1000));
 async function enqueue(env:Env,f:Fund,event:string,text:string){await env.HOME_DB.prepare('INSERT INTO mono_outbox(fund_id,event_key,text) VALUES (?,?,?) ON CONFLICT(fund_id,event_key) DO NOTHING').bind(f.id,event,text).run();}
+export type MonoDefer=(task:Promise<unknown>)=>void;
+async function webhookSecret(env:Env,connectionId:string){
+  if(!env.MONOBANK_ENCRYPTION_KEY)throw new Error('Monobank key missing');
+  const k=await crypto.subtle.importKey('raw',new TextEncoder().encode(env.MONOBANK_ENCRYPTION_KEY),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+  return Array.from(new Uint8Array(await crypto.subtle.sign('HMAC',k,new TextEncoder().encode('monobank-webhook:'+connectionId))),b=>b.toString(16).padStart(2,'0')).join('');
+}
+export async function registerMonoWebhook(env:Env,connectionId:string){
+  const c=await env.HOME_DB.prepare('SELECT * FROM mono_connections WHERE id=?').bind(connectionId).first<Connection>();
+  if(!c)throw new Error('Mono connection missing');
+  // Claim before network calls; cron retries failed registrations without flooding the API.
+  const claimed=await env.HOME_DB.prepare('UPDATE mono_connections SET webhook_attempted_at=unixepoch() WHERE id=? AND webhook_attempted_at<unixepoch()-300').bind(c.id).run();
+  if(!claimed.meta.changes)return false;
+  const info=await telegram<{url:string}>(env,'getWebhookInfo',{});
+  const base=new URL(info.url);
+  if(base.protocol!=='https:'||base.username||base.password)throw new Error('Telegram webhook missing');
+  const url=base.origin+'/monobank/webhook/'+encodeURIComponent(c.id)+'/'+await webhookSecret(env,c.id);
+  await api(await decrypt(env,c.token_cipher),'webhook',{webHookUrl:url});
+  await env.HOME_DB.prepare('UPDATE mono_connections SET webhook_url=?,webhook_registered_at=unixepoch() WHERE id=?').bind(url,c.id).run();
+  return true;
+}
+async function ingestOperation(env:Env,f:Fund,o:Operation,defer?:MonoDefer){
+  if(o.hold||o.time<f.started_at)return;
+  await recordBankContribution(env,f.id,o,f.deposits&&o.amount>0?{
+    legacy:depositText(f.title,o.amount,o.balance,f.goal,o.comment),
+    heading:`💸 <b>+${money(o.amount)} у банку</b>\n`,
+  }:undefined,defer);
+
+}
+async function goalNotice(env:Env,f:Fund){
+  if(f.goal_notice&&!f.goal_sent&&f.goal>0&&f.balance>=f.goal){
+    await enqueue(env,f,'goal',goalText(f.title,f.balance,f.goal));
+    await env.HOME_DB.prepare('UPDATE mono_funds SET goal_sent=1 WHERE id=?').bind(f.id).run();
+  }
+}
+export async function monoWebhook(request:Request,env:Env,defer?:MonoDefer):Promise<Response>{
+  const parts=new URL(request.url).pathname.split('/');
+  const connectionId=parts[3],secret=parts[4];
+  if(parts.length!==5||!connectionId||!secret||!env.MONOBANK_ENCRYPTION_KEY)return new Response(null,{status:404});
+  const expected=await webhookSecret(env,connectionId);
+  let mismatch=secret.length^expected.length;
+  for(let i=0;i<expected.length;i++)mismatch|=expected.charCodeAt(i)^(secret.charCodeAt(i)||0);
+  if(mismatch)return new Response(null,{status:404});
+  const c=await env.HOME_DB.prepare('SELECT id FROM mono_connections WHERE id=?').bind(connectionId).first();
+  if(!c)return new Response(null,{status:404});
+  if(request.method==='GET')return new Response('OK');
+  if(request.method!=='POST')return new Response(null,{status:405});
+  let event:{type:string;data?:{account?:string;statementItem?:Operation}};
+  try{
+    const reader=request.body?.getReader();if(!reader)throw new Error();
+    const chunks:Uint8Array[]=[];let length=0;
+    for(;;){const chunk=await reader.read();if(chunk.done)break;length+=chunk.value.length;if(length>65536){await reader.cancel();return new Response(null,{status:413});}chunks.push(chunk.value);}
+    const bytes=new Uint8Array(length);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
+    event=JSON.parse(new TextDecoder().decode(bytes));
+    if(!event||typeof event.type!=='string')throw new Error();
+  }catch{return new Response(null,{status:400});}
+  if(event.type!=='StatementItem')return new Response('OK');
+  const o=event.data?.statementItem;
+  if(typeof event.data?.account!=='string'||!o||typeof o.id!=='string'||!o.id||o.id.length>200||!Number.isSafeInteger(o.time)||o.time<0||o.time>now()+300||!Number.isSafeInteger(o.amount)||!Number.isSafeInteger(o.balance)||typeof o.hold!=='boolean')return new Response(null,{status:400});
+  try{
+    const f=await env.HOME_DB.prepare(`SELECT f.* FROM mono_funds f JOIN groups g ON g.chat_id=f.chat_id
+      WHERE f.connection_id=? AND f.jar_id=? AND f.active=1 AND g.status='approved' AND g.bot_present=1 AND g.version=f.group_version`).bind(connectionId,event.data.account).first<Fund>();
+    if(f){
+      // Only persistence is awaited by the bank; Telegram delivery runs after the HTTP response.
+      await ingestOperation(env,f,o,defer);
+      const latest=await env.HOME_DB.prepare('SELECT * FROM mono_funds WHERE id=?').bind(f.id).first<Fund>();
+      if(latest)await goalNotice(env,latest);
+      const delivery=Promise.allSettled([drainMonoOutbox(env),refreshBankCollectionPosts(env,f.id)]).then(results=>{if(results.some(r=>r.status==='rejected'))console.error('Mono delivery deferred');});
+      if(defer)defer(delivery);else await delivery;
+    }
+    return new Response('OK');
+  }catch{console.error('Mono event persistence failed');return new Response(null,{status:503});}
+}
 export async function scheduledMono(env:Env){
   await env.HOME_DB.prepare("DELETE FROM mono_setup WHERE expires_at<=unixepoch() AND step<>'token'").run();
   await env.HOME_DB.prepare('DELETE FROM mono_connections WHERE id NOT IN (SELECT connection_id FROM mono_funds) AND id NOT IN (SELECT connection_id FROM mono_setup WHERE connection_id IS NOT NULL)').run();
   if(!env.MONOBANK_ENCRYPTION_KEY)return;
   const funds=(await env.HOME_DB.prepare('SELECT f.* FROM mono_funds f JOIN groups g ON g.chat_id=f.chat_id WHERE f.active=1 AND g.status=\'approved\' AND g.bot_present=1 AND g.version=f.group_version ORDER BY f.checked_at').all<Fund>()).results;
+  const connections=new Set(funds.map(f=>f.connection_id));
+  for(const connection of connections){
+    const c=await env.HOME_DB.prepare('SELECT * FROM mono_connections WHERE id=?').bind(connection).first<Connection>();
+    // Refresh registration daily: monobank disables delivery after three failed attempts.
+    if(c&&c.webhook_registered_at<now()-86400)await registerMonoWebhook(env,connection).catch(()=>{});
+  }
   for(const f of funds){
+    const connection=await env.HOME_DB.prepare('SELECT * FROM mono_connections WHERE id=?').bind(f.connection_id).first<Connection>();
+    if(connection?.webhook_registered_at&&f.checked_at>now()-3600)continue;
     const claim=await env.HOME_DB.prepare('UPDATE mono_connections SET last_request_at=unixepoch() WHERE id=? AND last_request_at<unixepoch()-65').bind(f.connection_id).run();
     if(!claim.meta.changes)continue;
     try{
@@ -178,31 +261,27 @@ export async function scheduledMono(env:Env){
       const ops=await api<Operation[]>(await decrypt(env,c.token_cipher),`statement/${encodeURIComponent(f.jar_id)}/${start}/${end}`);
       if(!Array.isArray(ops)||ops.some(o=>typeof o.id!=='string'||!Number.isSafeInteger(o.time)||!Number.isSafeInteger(o.amount)||!Number.isSafeInteger(o.balance)))throw new Error('Invalid operations');
       ops.sort((a,b)=>a.time-b.time||a.id.localeCompare(b.id));
-      for(const o of ops){
-        if(o.hold||o.time<f.started_at)continue;
-        // Persist transaction and its notification together, so retries cannot lose an event.
-        await recordBankContribution(env,f.id,o,f.deposits&&o.amount>0?{
-            legacy:depositText(f.title,o.amount,o.balance,f.goal,o.comment),
-            heading:`💸 <b>+${money(o.amount)} у банку</b>\n`,
-          }:undefined);
-      }
-      const latest=ops.filter(o=>!o.hold&&o.time>=f.started_at).at(-1);const balance=latest?.balance??f.balance;
-      await env.HOME_DB.prepare("UPDATE mono_funds SET balance=?,checked_at=?,error='' WHERE id=?").bind(balance,end,f.id).run();
-      if(f.goal_notice&&!f.goal_sent&&f.goal>0&&balance>=f.goal){
-        await enqueue(env,f,'goal',goalText(f.title,balance,f.goal));
-        await env.HOME_DB.prepare('UPDATE mono_funds SET goal_sent=1 WHERE id=?').bind(f.id).run();
-      }
-      const hour=Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Kyiv',hour:'2-digit',hourCycle:'h23'}).format(new Date()));
-      if(f.daily&&hour>=20&&end>=now()-60){
-        const day=dateKyiv(now());
-        const total=opsForDay(await env.HOME_DB.prepare('SELECT time,amount FROM mono_operations WHERE fund_id=?').bind(f.id).all<{time:number;amount:number}>(),day);
-        await enqueue(env,f,'daily:'+day,dailyText(f.title,total,balance,f.goal));
-      }
+      for(const o of ops)await ingestOperation(env,f,o);
+      await env.HOME_DB.prepare("UPDATE mono_funds SET checked_at=?,error='' WHERE id=?").bind(end,f.id).run();
     }catch{
       const warning=await env.HOME_DB.prepare("UPDATE mono_funds SET error='unavailable' WHERE id=? AND error=''").bind(f.id).run();
       if(warning.meta.changes)await send(env,env.ADMIN_TELEGRAM_USER_ID,`Не вдалося оновити банку «${f.title}». Повторимо перевірку автоматично.`).catch(()=>{});
     }
   }
+  for(const fund of funds){
+    const f=await env.HOME_DB.prepare('SELECT * FROM mono_funds WHERE id=?').bind(fund.id).first<Fund>();
+    if(!f)continue;
+    await goalNotice(env,f);
+    const hour=Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Kyiv',hour:'2-digit',hourCycle:'h23'}).format(new Date()));
+    if(f.daily&&hour>=20&&f.checked_at>=now()-3600){
+      const day=dateKyiv(now());
+      const total=opsForDay(await env.HOME_DB.prepare('SELECT time,amount FROM mono_operations WHERE fund_id=?').bind(f.id).all<{time:number;amount:number}>(),day);
+      await enqueue(env,f,'daily:'+day,dailyText(f.title,total,f.balance,f.goal));
+    }
+  }
+  await drainMonoOutbox(env);
+}
+async function drainMonoOutbox(env:Env){
   const pending=(await env.HOME_DB.prepare(`SELECT o.*,f.chat_id FROM mono_outbox o JOIN mono_funds f ON f.id=o.fund_id JOIN groups g ON g.chat_id=f.chat_id WHERE o.sent_at IS NULL AND o.lease_until<unixepoch() AND f.active=1 AND g.status='approved' AND g.bot_present=1 AND g.version=f.group_version ORDER BY o.id LIMIT 20`).all<{id:number;chat_id:number;text:string}>()).results;
   for(const item of pending){
     const claim=await env.HOME_DB.prepare('UPDATE mono_outbox SET lease_until=unixepoch()+120 WHERE id=? AND sent_at IS NULL AND lease_until<unixepoch()').bind(item.id).run();if(!claim.meta.changes)continue;

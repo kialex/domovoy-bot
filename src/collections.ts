@@ -527,6 +527,13 @@ async function refreshCollectionPost(env: Env, collection: Collection) {
     .bind(hash,collection.id,collection.message_id,collection.closed).run();
 }
 
+export async function refreshBankCollectionPosts(env:Env,fundId:string){
+  const {results}=await env.HOME_DB.prepare(`SELECT c.* FROM house_collections c JOIN groups g ON g.chat_id=c.chat_id
+    WHERE c.mono_fund_id=? AND c.closed=0 AND c.message_id IS NOT NULL
+      AND c.publish_lease_until<=unixepoch() AND g.status='approved' AND g.bot_present=1`).bind(fundId).all<Collection>();
+  for(const c of results)await refreshCollectionPost(env,c);
+}
+
 export async function scheduledCollections(env: Env) {
   const linked=await env.HOME_DB.prepare(`SELECT c.id FROM house_collections c JOIN polls p ON p.id=c.vote_poll_id
     WHERE p.status='open' AND (p.ends_at IS NULL OR p.ends_at>unixepoch())`).all<{id:number}>();
@@ -752,8 +759,8 @@ export async function residentCollectionLines(env: Env, uid: number) {
 }
 
 export async function recordBankContribution(env: Env, fundId: string, operation: {
-  id: string; time: number; amount: number; comment?: string;
-}, notification?: {legacy:string;heading:string}) {
+  id: string; time: number; amount: number; comment?: string; balance?:number;
+}, notification?: {legacy:string;heading:string}, defer?:(task:Promise<unknown>)=>void) {
   const comment=typeof operation.comment==='string'?operation.comment.replace(/\s+/g,' ').trim().slice(0,300):'';
   const matches=[...comment.matchAll(/(?<![\p{L}\p{N}])(?:кв\.?|квартира)\s*№?\s*(\d{1,3}\s*[аa]?)(?![\p{L}\p{N}/-])/giu)];
   const numbers=new Set(matches.map(match=>apartmentNumber(match[1].replace(/\s/g,''))));
@@ -780,6 +787,11 @@ export async function recordBankContribution(env: Env, fundId: string, operation
       ON CONFLICT(collection_id,premise_id) DO UPDATE SET amount=amount+excluded.amount`)
       .bind(operation.amount,...values));
   }
+  // Balance and contribution are committed with the operation, including on retries after a crash.
+  if(operation.balance!==undefined)statements.push(env.HOME_DB.prepare(`UPDATE mono_funds SET balance=?,balance_updated_at=?,error=''
+    WHERE id=? AND balance_updated_at<=? AND NOT EXISTS
+      (SELECT 1 FROM mono_operations WHERE fund_id=? AND operation_id=?)`)
+    .bind(operation.balance,operation.time,fundId,operation.time,fundId,operation.id));
   statements.push(env.HOME_DB.prepare(`INSERT INTO mono_operations(fund_id,operation_id,time,amount,collection_id,credited_premise_id,collection_comment)
     SELECT f.id,?,?,?,c.id,p.id,CASE WHEN c.id IS NOT NULL THEN ? END
     FROM mono_funds f LEFT JOIN house_collections c ON ${link}
@@ -788,10 +800,15 @@ export async function recordBankContribution(env: Env, fundId: string, operation
     .bind(operation.id,operation.time,operation.amount,comment||null,operation.time,operation.amount,number,fundId));
   const inserted = (await env.HOME_DB.batch(statements)).at(-1);
   if(number && operation.amount>0 && inserted?.meta.changes && inserted.meta.last_row_id) {
-    const linked=await env.HOME_DB.prepare('SELECT collection_id FROM mono_operations WHERE rowid=?')
-      .bind(inserted.meta.last_row_id).first<{collection_id:number|null}>();
-    if(linked?.collection_id)await syncCollectionVotes(env,linked.collection_id)
-      .catch(()=>console.error('Contribution vote sync deferred',linked.collection_id));
-    await sendApartmentReceipt(env,inserted.meta.last_row_id).catch(()=>{});
+    const receiptId=inserted.meta.last_row_id;
+    const deliver=async()=>{
+      const linked=await env.HOME_DB.prepare('SELECT collection_id FROM mono_operations WHERE rowid=?')
+        .bind(receiptId).first<{collection_id:number|null}>();
+      if(linked?.collection_id)await syncCollectionVotes(env,linked.collection_id)
+        .catch(()=>console.error('Contribution vote sync deferred',linked.collection_id));
+      await sendApartmentReceipt(env,receiptId).catch(()=>{});
+    };
+    if(defer)defer(deliver());else await deliver();
   }
+  return Boolean(inserted?.meta.changes);
 }

@@ -1360,6 +1360,11 @@ async function monoSetup(h){
       h.monoRequests.push(String(url));
       assert.equal(init.headers['X-Token'],monoToken);
       if(h.monoFailure)return Response.json({errorDescription:'private detail'},{status:401});
+      if(String(url).endsWith('/webhook')){
+        h.registeredMonoUrl=JSON.parse(init.body).webHookUrl;
+        assert.equal((await worker.fetch(new Request(h.registeredMonoUrl),h.env)).status,200,'Bank verifies callback before enabling it');
+        return Response.json({});
+      }
       if(String(url).endsWith('/client-info'))return Response.json({jars:[{id:'jar-1',title:'Генератор',currencyCode:980,balance:100000,goal:200000},{id:'jar-2',title:'Ремонт',currencyCode:980,balance:0}]});
       return Response.json(h.monoOps);
     }
@@ -1853,4 +1858,75 @@ test('linked collection bank credits cannot duplicate, cross houses or add votes
     assert.equal(currentVotes(h).length,1);
     assert.equal(h.sqlite.prepare('SELECT amount FROM collection_totals WHERE premise_id=?').get(next.premise_id).amount,200000);
   } finally {h.close();}
+});
+
+
+test('monobank automatically registers a verified secret endpoint and retries failed registration',async()=>{
+  const {registerMonoWebhook,scheduledMono}=await import('../src/monobank.ts');
+  const h=harness();try{
+    h.apiOverride=method=>method==='getWebhookInfo'?Response.json({ok:true,result:{url:'https://home.test/telegram/webhook'}}):null;
+    const f=await saveMono(h,await monoSetup(h));
+    const c=h.sqlite.prepare('SELECT * FROM mono_connections').get();
+    assert.ok(c.webhook_registered_at);
+    assert.equal(c.webhook_url,h.registeredMonoUrl);
+    assert.match(c.webhook_url,/^https:\/\/home\.test\/monobank\/webhook\/[a-z0-9]+\/[a-f0-9]{64}$/);
+    assert.equal(c.webhook_url.includes(monoToken),false);
+    assert.equal((await worker.fetch(new Request(c.webhook_url+'x'),h.env)).status,404);
+    h.sqlite.exec('UPDATE mono_connections SET webhook_attempted_at=0,webhook_registered_at=0');
+    h.monoFailure=true;
+    await assert.rejects(registerMonoWebhook(h.env,f.connection_id));
+    assert.equal(h.sqlite.prepare('SELECT webhook_registered_at n FROM mono_connections').get().n,0);
+    const before=h.monoRequests.length;
+    await registerMonoWebhook(h.env,f.connection_id);
+    assert.equal(h.monoRequests.length,before,'Failed registrations are throttled');
+    h.monoFailure=false;h.sqlite.exec('UPDATE mono_connections SET webhook_attempted_at=0');
+    await scheduledMono(h.env);
+    assert.ok(h.sqlite.prepare('SELECT webhook_registered_at n FROM mono_connections').get().n);
+  }finally{h.close();}
+});
+
+test('monobank webhook credits once, filters accounts and paused groups, and keeps newer balances',async()=>{
+  const {scheduledMono}=await import('../src/monobank.ts');
+  const h=harness();try{
+    const member=await register(h,2,{number:'25'});
+    h.apiOverride=method=>method==='getWebhookInfo'?Response.json({ok:true,result:{url:'https://home.test/telegram/webhook'}}):null;
+    const f=await saveMono(h,await monoSetup(h));
+    h.sqlite.prepare("INSERT INTO house_collections(id,chat_id,title,mono_fund_id,bank_linked_at) VALUES (1,-100001,'Генератор',?,0)").run(f.id);
+    const tasks=[];
+    const post=async(o,account='jar-1',url=h.registeredMonoUrl)=>{
+      const response=await worker.fetch(new Request(url,{method:'POST',body:JSON.stringify({type:'StatementItem',data:{account,statementItem:o}})}),h.env,{waitUntil:p=>tasks.push(p)});
+      await Promise.all(tasks.splice(0));return response.status;
+    };
+    const op={id:'push-a',time:f.started_at,amount:150000,balance:250000,hold:false,comment:'кв. 25'};
+    assert.equal(await post(op,'other-account'),200);
+    assert.equal(h.sqlite.prepare('SELECT COUNT(*) n FROM mono_operations').get().n,0);
+    assert.equal(await post({...op,hold:true}),200);
+    assert.equal(await post({...op,time:f.started_at-1}),200);
+    assert.equal(await post({...op,amount:'150000'}),400);
+    assert.equal(await post(op),200);
+    assert.equal(await post(op),200);
+    assert.equal(h.sqlite.prepare('SELECT amount FROM collection_totals WHERE premise_id=?').get(member.premise_id).amount,150000);
+    assert.equal(h.calls.filter(c=>c.text?.startsWith('Дякуємо за участь у зборі!')).length,1);
+    assert.equal(h.sqlite.prepare("SELECT COUNT(*) n FROM mono_outbox WHERE event_key='op:push-a' AND sent_at IS NOT NULL").get().n,1);
+    const later={...op,id:'push-b',time:op.time+1,balance:400000};
+    assert.equal(await post(later),200);
+    assert.equal(await post({...op,id:'push-earlier',amount:-1000,balance:99000}),200);
+    assert.equal(await post(op),200);
+    assert.equal(h.sqlite.prepare('SELECT balance FROM mono_funds').get().balance,400000);
+    const requests=h.monoRequests.length;
+    await scheduledMono(h.env);
+    assert.equal(h.monoRequests.length,requests,'Healthy webhook avoids five minute polling');
+    h.sqlite.exec('UPDATE mono_funds SET checked_at=unixepoch()-3601');
+    h.monoOps=[op,later];
+    await scheduledMono(h.env);
+    assert.equal(h.monoRequests.length,requests+1,'Hourly reconciliation remains enabled');
+    assert.equal(h.sqlite.prepare('SELECT amount FROM collection_totals WHERE premise_id=?').get(member.premise_id).amount,300000);
+    h.sqlite.exec('UPDATE mono_funds SET active=0');
+    assert.equal(await post({...op,id:'paused'}),200);
+    h.sqlite.exec('UPDATE mono_funds SET active=1; UPDATE groups SET version=version+1');
+    assert.equal(await post({...op,id:'disconnected'}),200);
+    assert.equal(h.sqlite.prepare("SELECT COUNT(*) n FROM mono_operations WHERE operation_id IN ('paused','disconnected')").get().n,0);
+    assert.equal((await worker.fetch(new Request(h.registeredMonoUrl,{method:'POST',body:'bad JSON'}),h.env)).status,400);
+    assert.equal((await worker.fetch(new Request(h.registeredMonoUrl,{method:'POST',body:' '.repeat(65537)}),h.env)).status,413);
+  }finally{h.close();}
 });

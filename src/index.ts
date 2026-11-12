@@ -2,7 +2,7 @@ import { scheduledCityNotices } from './city-notices.ts';
 import { adminResidentCallback, adminResidentMessage } from './admin-resident.ts';
 import { groupRequest, groupRequestCallback } from './group-requests.ts';
 import { COLLECTIONS, clearCollectionInput, collectionCallback, collectionMessage, collectionsMenu, scheduledCollections } from './collections.ts';
-import { ADD_BANK, FUNDS, fundsMenu, startMono, monoMessage, monoCallback, scheduledMono, clearMonoSetup } from './monobank.ts';
+import { ADD_BANK, FUNDS, fundsMenu, startMono, monoMessage, monoCallback, scheduledMono, clearMonoSetup, monoWebhook } from './monobank.ts';
 import { retryGroupWelcomes } from './group-welcome.ts';
 import { joinRequest, joinCallback, retryJoins } from './join-requests.ts';
 import { HOUSE_RESIDENTS, houseResidents, directoryCallback } from './house-residents.ts';
@@ -113,8 +113,9 @@ export default {
     await scheduledCollections(env);
     await scheduledCityNotices(env).catch(error=>console.error('1562 check failed',error));
   },
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const path = new URL(request.url).pathname;
+    if (path.startsWith('/monobank/webhook/')) return monoWebhook(request,env,ctx?task=>ctx.waitUntil(task):undefined);
     if (path === '/' && request.method === 'GET') return Response.json({ service: 'homebot', status: 'ok' });
     if (path !== '/telegram/webhook') return new Response(null, { status: 404 });
     if (request.method !== 'POST') return new Response(null, { status: 405, headers: { Allow: 'POST' } });

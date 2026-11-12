@@ -34,6 +34,15 @@ async function reply(env:Env,c:Pick<RequestContext,'chat_id'|'message_id'|'threa
     ...(buttons?{reply_markup:{inline_keyboard:buttons}}:{}),
   });
 }
+async function registeredResident(env:Env,c:RequestContext,uid:number,bot?:Identity){
+  const member=await env.HOME_DB.prepare(`SELECT m.id FROM memberships m JOIN premises p ON p.id=m.premise_id
+    WHERE m.user_id=? AND p.chat_id=? AND m.status='approved' LIMIT 1`).bind(uid,c.chat_id).first();
+  if(member)return true;
+  const identity=bot||await botIdentity(env);
+  const url=`https://t.me/${identity.username}?start=group_${Math.abs(c.chat_id)}`;
+  await reply(env,c,`Відповідаю лише зареєстрованим мешканцям.\n\n<a href="${escapeHtml(url)}">Пройти реєстрацію</a>`);
+  return false;
+}
 async function publicVoters(env:Env,c:RequestContext,pollId:number,kind:PollRequestKind='voters'){
   const rows=(await env.HOME_DB.prepare(`SELECT v.option_index,p.kind,p.number,p.business_name,p.entrance FROM premise_votes v JOIN premises p ON p.id=v.premise_id JOIN polls poll ON poll.id=v.poll_id WHERE v.poll_id=? AND poll.chat_id=? AND p.chat_id=poll.chat_id ORDER BY p.entrance,p.number_start,p.number,p.business_name`).bind(pollId,c.chat_id).all<{option_index:number;kind:string;number:string;business_name:string;entrance:number|null}>()).results;
   if(!rows.length&&kind==='voters')return reply(env,c,'Ще ніхто не проголосував.');
@@ -108,6 +117,7 @@ export async function groupRequest(env:Env,m:Message){
   const replied=m.reply_to_message?.from?.id===bot.id;
   if(!tagged&&!replied)return;
   const context:RequestContext={chat_id:m.chat.id,message_id:m.message_id,thread_id:m.message_thread_id||null};
+  if(!await registeredResident(env,context,m.from.id,bot))return;
   const question=m.text.replace(/@\w+/g,'').trim();
   if(question.length>1500)return reply(env,context,'Скоротіть запит до 1500 символів.');
   let referencedPoll:{id:number}|null=null;
@@ -145,6 +155,7 @@ export async function groupRequestCallback(env:Env,q:Callback){
   if(extra.length||!['page','pick','report','rpage'].includes(action)||!/^\d+$/.test(value||''))return true;
   const c:RequestContext={chat_id:q.message.chat.id,message_id:q.message.message_id,thread_id:q.message.message_thread_id||null};
   if(!isConnected(await getGroup(env,c.chat_id)))return true;
+  if(!await registeredResident(env,c,q.from.id))return true;
   if(action==='page'||action==='rpage'){
     const page=Number(value);const polls=await activePolls(env,c.chat_id);
     if(Number.isSafeInteger(page)&&page>=0&&page*8<polls.length)await choose(env,c,page,action==='rpage'?'report':'voters');

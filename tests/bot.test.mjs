@@ -1501,6 +1501,7 @@ test('group voter selection is stateless, available to participants and scoped t
 });
 test('group requests handle empty polls, disconnected groups and UTF-16 mention offsets',async()=>{
   const h=harness();try{
+    await register(h,2);
     await askGroup(h,'хто голосував');assert.match(h.calls.at(-1).text,/немає активних/);
     const p=await poll(h);h.calls.length=0;
     await h.dispatch({message:{message_id:456,chat:{id:-100001,type:'supergroup'},from:{id:2},text:'👋 @HOMETESTBOT хто голосував',entities:[{type:'mention',offset:3,length:12}]}});
@@ -1516,6 +1517,7 @@ function mockAi(h,result){
 }
 test('Workers AI answers general questions only when addressed and sends no database records or history',async()=>{
   const h=harness();try{
+    await register(h,2);
     const requests=mockAi(h,{response:'Лимонний сік: змішайте сік лимона з водою <за смаком> & додайте цукор.'});
     h.calls.length=0;await askGroup(h,'Дай рецепт лимонного сока',{tag:false});assert.equal(requests.length,0);
     await askGroup(h,'Дай рецепт лимонного сока');assert.equal(requests.length,1);
@@ -1540,7 +1542,7 @@ test('Workers AI report tool uses exact database counts and public premises, ign
 });
 test('AI report selection is stateless, preserves report action and rechecks group ownership on clicks',async()=>{
   const h=harness(2);try{
-    await register(h,2);const p=await poll(h);await poll(h);const other=await poll(h,-100002);
+    await register(h,2);await register(h,3);const p=await poll(h);await poll(h);const other=await poll(h,-100002);
     const requests=mockAi(h,{tool_calls:[{function:{name:'get_poll_report',arguments:'{}'}}]});h.calls.length=0;
     await askGroup(h,'Как у нас дела с голосованием?');
     const choice=h.calls.find(c=>isSend(c.method));assert.match(choice.text,/показати звіт/);
@@ -1553,6 +1555,7 @@ test('AI report selection is stateless, preserves report action and rechecks gro
 });
 test('AI tool title lookup supports closed polls but cannot query another group or arbitrary SQL',async()=>{
   const h=harness(2);try{
+    await register(h,2);
     const p=await poll(h);await closePoll(h,p.id);
     h.sqlite.prepare("UPDATE polls SET question='Генератор фінал' WHERE id=?").run(p.id);
     const other=await poll(h,-100002);h.sqlite.prepare("UPDATE polls SET question='Чужий збір' WHERE id=?").run(other.id);
@@ -1602,6 +1605,7 @@ test('recipe questions never expose voting tools or execute a spurious model rep
 });
 test('short report requests can use a replied poll as context without sending its content to AI',async()=>{
   const h=harness();try{
+    await register(h,2);
     const p=await poll(h);const calls=mockAi(h,{tool_calls:[{name:'get_poll_report',arguments:{}}]});h.calls.length=0;
     await askGroup(h,'дай подробный отчет',{tag:false,reply:{message_id:p.message_id,chat:{id:-100001,type:'supergroup'},from:{id:999,is_bot:true},text:'private quoted text'}});
     assert.equal(calls[0].input.tools.length,2);assert.doesNotMatch(JSON.stringify(calls),/private quoted text/);
@@ -1928,5 +1932,44 @@ test('monobank webhook credits once, filters accounts and paused groups, and kee
     assert.equal(h.sqlite.prepare("SELECT COUNT(*) n FROM mono_operations WHERE operation_id IN ('paused','disconnected')").get().n,0);
     assert.equal((await worker.fetch(new Request(h.registeredMonoUrl,{method:'POST',body:'bad JSON'}),h.env)).status,400);
     assert.equal((await worker.fetch(new Request(h.registeredMonoUrl,{method:'POST',body:' '.repeat(65537)}),h.env)).status,413);
+  }finally{h.close();}
+});
+
+
+test('group answers require approved registration in this house before AI, reports or callbacks',async()=>{
+  const h=harness(2);try{
+    const calls=mockAi(h,{response:'Відповідь мешканцю'});
+    const p=await poll(h);
+    const publicReply={message_id:p.message_id,chat:{id:-100001,type:'supergroup'},from:{id:999,is_bot:true}};
+    h.calls.length=0;
+    await askGroup(h,'Привіт',{tag:false});
+    assert.equal(h.calls.length,0,'Unaddressed messages stay silent');
+    await askGroup(h,'Привіт',{thread:7});
+    assert.equal(calls.length,0,'Unregistered messages never reach AI');
+    assert.match(h.calls.at(-1).text,/лише зареєстрованим мешканцям/);
+    assert.match(h.calls.at(-1).text,/href="https:\/\/t.me\/HomeTestBot\?start=group_100001"/);
+    assert.equal(h.calls.at(-1).message_thread_id,7);
+    await askGroup(h,'хто голосував',{tag:false,reply:publicReply});
+    assert.match(h.calls.at(-1).text,/Пройти реєстрацію/);
+    await register(h,2,{chat:-100002});
+    await askGroup(h,'Привіт');
+    assert.equal(calls.length,0,'Registration in another house grants no access');
+    const m=await register(h,2,{approve:false});
+    await askGroup(h,'Привіт');assert.equal(calls.length,0,'Pending registration grants no access');
+    const message={message_id:123,chat:{id:-100001,type:'supergroup'}};
+    for(const action of ['pick','report','page','rpage']){
+      h.calls.length=0;await h.cb(2,`gv:${action}:${action.endsWith('page')?0:p.id}`,message);
+      assert.match(h.calls.at(-1).text,/Пройти реєстрацію/);
+      assert.doesNotMatch(h.calls.at(-1).text,/Статистика|Ще ніхто/);
+    }
+    h.sqlite.prepare("UPDATE memberships SET status='approved' WHERE id=?").run(m.id);
+    h.calls.length=0;await askGroup(h,'Привіт');
+    assert.equal(calls.length,1);assert.equal(h.calls.at(-1).text,'Відповідь мешканцю');
+    h.sqlite.prepare("UPDATE memberships SET status='revoked' WHERE id=?").run(m.id);
+    await askGroup(h,'Привіт');assert.equal(calls.length,1,'Revoked registration is rechecked');
+    assert.match(h.calls.at(-1).text,/Пройти реєстрацію/);
+    // The link opens registration for the same house even with several connected groups.
+    await h.msg(5,'/start group_100001');
+    assert.equal(h.form(5).chat_id,-100001);
   }finally{h.close();}
 });

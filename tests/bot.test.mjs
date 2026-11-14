@@ -264,6 +264,9 @@ test('public collection uses bank progress, edits it in place and replaces the p
     await press('Спробувати ще раз');
     const first=saved().message_id;
     const post=publicCalls().at(-1);
+    assert.match(post.text,/^<b>Генератор<\/b>\n🟢 Збір відкрито\n\nЗібрано/);
+    assert.ok(post.text.indexOf('Мінімальний внесок')<post.text.indexOf('Резервне живлення'));
+    assert.ok(post.text.indexOf('Резервне живлення')<post.text.indexOf('Посилання на банку'));
     assert.match(post.text,/32\s400 грн/);
     assert.match(post.text,/150\s000 грн/);
     assert.match(post.text,/2\s400 грн/);
@@ -282,7 +285,7 @@ test('public collection uses bank progress, edits it in place and replaces the p
     assert.equal(publicCalls().at(-1).message_id,first);
     await h.cb(1,'hc:close:1');
     assert.equal(saved().next_repost_at,null);
-    assert.match(publicCalls().at(-1).text,/Завершено/);
+    assert.match(publicCalls().at(-1).text,/🏁 Збір завершено/);
     const count=publicCalls().length;
     await scheduledCollections(h.env);
     assert.equal(publicCalls().length,count);
@@ -1245,7 +1248,7 @@ test('poll registration explains why it opened before asking for the premise',as
  }finally{h.close();}
 });
 
-test('poll wizard validates a short title and separate description; cards retain it through voting and closing',async()=>{
+test('poll wizard validates a short title and description; active cards retain it and public results omit it',async()=>{
  const h=harness();try{
   await h.msg(1,'🗳 Створити голосування');const d=h.sqlite.prepare('SELECT * FROM poll_drafts').get();
   await h.msg(1,'A'.repeat(101));assert.equal(h.sqlite.prepare('SELECT step FROM poll_drafts').get().step,'question');
@@ -1258,7 +1261,7 @@ test('poll wizard validates a short title and separate description; cards retain
   const card=h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).at(-1);assert.match(card.text,/Ремонт &lt;ліфта&gt; &amp; входу/);
   await register(h,2);await cast(h,2,p,0);assert.match(h.calls.filter(c=>c.method==='editMessageText').at(-1).text,/Вартість: 500 грн/);
   await h.cb(1,`pollctl:raise:${p.id}`);assert.match(h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).at(-1).text,/Вартість: 500 грн/);
-  await closePoll(h,p.id);assert.match(h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).at(-1).text,/Вартість: 500 грн/);
+  await closePoll(h,p.id);assert.doesNotMatch(h.calls.filter(c=>isSend(c.method)&&Number(c.chat_id)===p.chat_id).at(-1).text,/Вартість: 500 грн/);
   await h.cb(1,`pollctl:results:${p.id}`);assert.match(h.calls.at(-1).text,/Вартість: 500 грн/);
  }finally{h.close();}
 });
@@ -1911,7 +1914,7 @@ test('monobank webhook credits once, filters accounts and paused groups, and kee
     assert.equal(await post({...op,amount:'150000'}),400);
     assert.equal(await post(op),200);
     const updated=h.calls.filter(c=>c.method==='editMessageText'&&c.message_id===777777).at(-1);
-    assert.match(updated.text,/Зробили внесок — <b>1 із 1 квартири<\/b>, яка підтримала збір/);
+    assert.match(updated.text,/Зробили внесок — <b>1 із 1 приміщення<\/b>, яке підтримало збір/);
     assert.match(updated.text,/Зібрано — <b>2\s500 грн<\/b>/);
 
     assert.equal(await post(op),200);
@@ -2027,7 +2030,7 @@ test('collection creation skips the link question when monobank provides its jar
 });
 
 
-test('collection participation counts unique paid supporting apartments and updates after manual payments and votes',async()=>{
+test('collection participation counts unique paid supporting premises and updates after manual payments and votes',async()=>{
   const h=harness(2);try{
     const a=await register(h,2,{number:'25'});
     const b=await register(h,3,{number:'26'});
@@ -2042,22 +2045,22 @@ test('collection participation counts unique paid supporting apartments and upda
     h.sqlite.exec("INSERT INTO house_collections(id,chat_id,title,requested_amount,message_id) VALUES (2,-100001,'Без голосування',200000,888888)");
     h.calls.length=0;await scheduledCollections(h.env);
     const post=()=>h.calls.filter(c=>c.method==='editMessageText'&&c.message_id===777777).at(-1);
-    assert.match(post().text,/Зробили внесок — <b>0 із 1 квартири<\/b>/);
+    assert.match(post().text,/Зробили внесок — <b>0 із 2 приміщень<\/b>/);
     assert.equal(h.calls.find(c=>c.message_id===888888).text.includes('Зробили внесок'),false);
     const pay=async(member,amount)=>{
       await h.cb(1,`hc:apartment:1:${member.premise_id}`);h.calls.length=0;await h.msg(1,amount);
     };
-    await pay(b,'2000');assert.match(post().text,/Зробили внесок — <b>0 із 1 квартири<\/b>/);
-    await pay(a,'1000');assert.match(post().text,/Зробили внесок — <b>1 із 1 квартири<\/b>/);
+    await pay(b,'2000');assert.match(post().text,/Зробили внесок — <b>0 із 2 приміщень<\/b>/);
+    await pay(a,'1000');assert.match(post().text,/Зробили внесок — <b>1 із 2 приміщень<\/b>/);
     // A second payment changes the total, not the number of apartments.
-    await pay(a,'1000');assert.match(post().text,/Зробили внесок — <b>1 із 1 квартири<\/b>/);
-    await pay(business,'2000');assert.match(post().text,/Зробили внесок — <b>1 із 1 квартири<\/b>/);
+    await pay(a,'1000');assert.match(post().text,/Зробили внесок — <b>1 із 2 приміщень<\/b>/);
+    await pay(business,'2000');assert.match(post().text,/Зробили внесок — <b>2 із 2 приміщень<\/b>/);
     h.calls.length=0;await cast(h,6,p,1);
-    assert.match(post().text,/Зробили внесок — <b>1 із 2 квартир<\/b>, які підтримали збір/);
+    assert.match(post().text,/Зробили внесок — <b>2 із 3 приміщень<\/b>, які підтримали збір/);
     // Changing the answer removes this paid apartment from both selected-answer counts.
     h.calls.length=0;await cast(h,2,p,0);
-    assert.match(post().text,/Зробили внесок — <b>0 із 1 квартири<\/b>/);
-    await cast(h,2,p,1);assert.match(post().text,/Зробили внесок — <b>1 із 2 квартир<\/b>/);
+    assert.match(post().text,/Зробили внесок — <b>1 із 2 приміщень<\/b>/);
+    await cast(h,2,p,1);assert.match(post().text,/Зробили внесок — <b>2 із 3 приміщень<\/b>/);
     await cast(h,7,p,1);
     assert.equal(h.sqlite.prepare('SELECT COUNT(*) n FROM premise_votes WHERE poll_id=? AND premise_id=?').get(p.id,a.premise_id).n,1);
   }finally{h.close();}
@@ -2177,5 +2180,38 @@ test('residents cannot mutate collections through forged administrative callback
     }
     h.calls.length=0;await h.cb(2,'rc:view:1:0',{message_id:777,chat:{id:-100001,type:'supergroup'}});
     assert.equal(h.calls.some(c=>isSend(c.method)||c.method==='editMessageText'),false);
+  }finally{h.close();}
+});
+
+test('final poll message omits description, counts all premises and lists every apartment under its answer',async()=>{
+  const h=harness();try{
+    const p=await poll(h);
+    h.sqlite.prepare("UPDATE polls SET description='Довгий опис для відкритого голосування' WHERE id=?").run(p.id);
+    for(const [i,number] of ['3','6','8','12','14','16','84А','97'].entries()){
+      const inserted=h.sqlite.prepare("INSERT INTO premises(chat_id,kind,number,number_start,number_end) VALUES (-100001,'apartment',?,?,?)")
+        .run(number,parseInt(number),parseInt(number));
+      h.sqlite.prepare('INSERT INTO premise_votes(poll_id,premise_id,user_id,option_index) VALUES (?,?,0,?)')
+        .run(p.id,inserted.lastInsertRowid,i===7?1:0);
+    }
+    const shop=h.sqlite.prepare("INSERT INTO premises(chat_id,kind,number,business_name,number_start,number_end) VALUES (-100001,'commercial','business:coffee','Кава <чай>',0,0)").run();
+    h.sqlite.prepare('INSERT INTO premise_votes(poll_id,premise_id,user_id,option_index) VALUES (?,?,0,0)').run(p.id,shop.lastInsertRowid);
+    const {livePollView}=await import('../src/polls.ts');
+    const open=await livePollView(h.env,h.sqlite.prepare('SELECT * FROM polls WHERE id=?').get(p.id));
+    assert.match(open.rich_message.html,/Довгий опис/);
+    h.calls.length=0;await closePoll(h,p.id);
+    const final=h.calls.find(c=>c.method==='sendRichMessage'&&c.chat_id===p.chat_id);
+    assert.ok(final,'Closing publishes a separate final message');
+    const html=final.rich_message.html;
+    assert.match(html,/Взяли участь у голосуванні — <b>9 приміщень<\/b><\/p>/);
+    assert.doesNotMatch(html,/Довгий опис|та ще|Проголосувати|<tg-button/);
+    const yes=html.slice(html.indexOf('Yes'),html.indexOf('No'));
+    const no=html.slice(html.indexOf('No'));
+    assert.match(yes,/<b>89%<\/b>/);assert.match(yes,/8 голосів/);
+    assert.match(yes,/Приміщення: 3, 6, 8, 12, 14, 16, 84А, Кава &lt;чай&gt;/);
+    assert.doesNotMatch(yes,/Квартири:|Комерція:/);
+    assert.doesNotMatch(yes,/Приміщення:.*97/);
+    assert.match(no,/<b>11%<\/b>/);assert.match(no,/1 голос/);assert.match(no,/Приміщення: 97/);
+    assert.doesNotMatch(no,/84А|Кава/);
+    assert.ok(h.calls.some(c=>c.method==='deleteMessage'&&c.message_id===p.message_id));
   }finally{h.close();}
 });

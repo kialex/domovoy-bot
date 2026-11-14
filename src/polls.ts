@@ -47,7 +47,7 @@ export async function livePollView(env: Env, poll: Poll, reposted=Boolean(poll.l
   const {results:votes}=await env.HOME_DB.prepare(`SELECT v.option_index,p.kind,p.number,p.business_name FROM premise_votes v JOIN premises p ON p.id=v.premise_id WHERE v.poll_id=? ORDER BY p.kind,p.number_start,p.number,p.business_name`).bind(poll.id).all<{option_index:number;kind:string;number:string;business_name:string}>();
   const counts=new Map<number,number>();for(const vote of votes)counts.set(vote.option_index,(counts.get(vote.option_index)||0)+1);
   return {
-    rich_message:richPollCard({title:poll.question,description:poll.description,options,counts:options.map((_,i)=>counts.get(i)||0),votedPremises:votes.map(p=>p.kind==='commercial'?p.business_name||'Комерція':p.number),pollId:poll.id,closed:poll.status==='closed',endsAt:poll.ends_at,closedAt:poll.closed_at,reposted}),
+    rich_message:richPollCard({title:poll.question,description:poll.description,options,counts:options.map((_,i)=>counts.get(i)||0),votedPremises:votes.map(p=>p.kind==='commercial'?p.business_name||'Комерція':p.number),votes:votes.map(p=>({optionIndex:p.option_index,kind:p.kind,label:p.kind==='commercial'?p.business_name||'Комерція':p.number})),pollId:poll.id,closed:poll.status==='closed',endsAt:poll.ends_at,closedAt:poll.closed_at,reposted}),
     text: pollCard(poll.id, poll.question, options, counts, poll.status==='closed',{endsAt:poll.ends_at,closedAt:poll.closed_at,description:poll.description}),
     buttons: poll.status==='closed'?[]:[
       ...options.map((text, index) => [{ text: `${text} · ${counts.get(index) || 0}`, callback_data: `vote:${poll.id}:${index}` }]),

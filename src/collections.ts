@@ -460,25 +460,24 @@ async function collectionProgress(env: Env, collection: Collection) {
 
 export async function publicCollectionText(env: Env, collection: Collection) {
   const {total,goal,url}=await collectionProgress(env,collection);
-  const figures:string[]=[];
-  if(collection.requested_amount!==null)figures.push(`💰 Мінімальний внесок — <b>${money(collection.requested_amount)}</b>`);
+  const figures:string[]=[`Зібрано — <b>${money(total)}</b>`];
   if(goal>0)figures.push(`🎯 Ціль банки — <b>${money(goal)}</b>`);
-  figures.push(`Зібрано — <b>${money(total)}</b>`);
+  if(collection.requested_amount!==null)figures.push(`💰 Мінімальний внесок — <b>${money(collection.requested_amount)}</b>`);
   if(collection.vote_poll_id!==null&&collection.vote_option_index!==null){
     const stats=await env.HOME_DB.prepare(`SELECT COUNT(*) AS supported,
       COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM collection_totals t
         WHERE t.collection_id=c.id AND t.premise_id=p.id AND t.amount>0) THEN 1 ELSE 0 END),0) AS paid
       FROM house_collections c JOIN polls poll ON poll.id=c.vote_poll_id AND poll.chat_id=c.chat_id
       JOIN premise_votes v ON v.poll_id=poll.id AND v.option_index=c.vote_option_index
-      JOIN premises p ON p.id=v.premise_id AND p.chat_id=c.chat_id AND p.kind='apartment'
+      JOIN premises p ON p.id=v.premise_id AND p.chat_id=c.chat_id
       WHERE c.id=?`).bind(collection.id).first<{supported:number;paid:number}>();
     const supported=stats?.supported??0;
     const singular=supported%10===1&&supported%100!==11;
-    figures.push(`👥 Зробили внесок — <b>${stats?.paid??0} із ${supported} ${singular?'квартири':'квартир'}</b>, ${singular?'яка підтримала':'які підтримали'} збір`);
+    figures.push(`👥 Зробили внесок — <b>${stats?.paid??0} із ${supported} ${singular?'приміщення':'приміщень'}</b>, ${singular?'яке підтримало':'які підтримали'} збір`);
   }
-  const blocks=[`<b>${escapeHtml(collection.title)}</b>${collection.closed?' · Завершено':''}`];
-  if(collection.description)blocks.push(escapeHtml(collection.description));
+  const blocks=[`<b>${escapeHtml(collection.title)}</b>\n${collection.closed?'🏁 Збір завершено':'🟢 Збір відкрито'}`];
   blocks.push(figures.join('\n'));
+  if(collection.description)blocks.push(escapeHtml(collection.description));
   if(!collection.closed&&collection.mono_fund_id) {
     if(url)blocks.push(`🔗 Посилання на банку\n<a href="${url}">${url}</a>`);
     if(collection.bank_card)blocks.push(`💳 Номер картки банки\n<code>${escapeHtml(collection.bank_card.replace(/(.{4})(?=.)/g,'$1 '))}</code>`);

@@ -2215,3 +2215,54 @@ test('final poll message omits description, counts all premises and lists every 
     assert.ok(h.calls.some(c=>c.method==='deleteMessage'&&c.message_id===p.message_id));
   }finally{h.close();}
 });
+
+test('collection message reminds only below twenty percent unpaid and updates to thanks when all supporters contribute',async()=>{
+  const h=harness();try{
+    const p=await poll(h);
+    h.sqlite.prepare("UPDATE polls SET status='closed' WHERE id=?").run(p.id);
+    h.sqlite.prepare(`INSERT INTO house_collections(id,chat_id,title,description,requested_amount,vote_poll_id,vote_option_index,message_id)
+      VALUES (1,-100001,'Генератор','Запрошуємо всіх охочих!',200000,?,0,777777)`).run(p.id);
+    h.sqlite.exec("INSERT INTO house_collections(id,chat_id,title) VALUES (2,-100001,'Інший збір'),(3,-100001,'Без голосування')");
+    const ids=[];
+    for(const [i,label] of ['1','2','3','4','84А','Кава <ранок> & вечір'].entries()){
+      const id=h.sqlite.prepare('INSERT INTO premises(chat_id,kind,number,business_name,number_start,number_end) VALUES (-100001,?,?,?,?,?)')
+        .run(i===5?'commercial':'apartment',i===5?'business:coffee':label,i===5?label:'',i+1,i+1).lastInsertRowid;
+      ids.push(id);
+      h.sqlite.prepare('INSERT INTO premise_votes(poll_id,premise_id,user_id,option_index) VALUES (?,?,0,0)').run(p.id,id);
+      if(i<4)h.sqlite.prepare('INSERT INTO collection_totals(collection_id,premise_id,amount) VALUES (1,?,200000)').run(id);
+    }
+    // A contribution to another collection must not mark this premise paid here.
+    h.sqlite.prepare('INSERT INTO collection_totals(collection_id,premise_id,amount) VALUES (2,?,200000)').run(ids[4]);
+    const render=async()=>{
+      h.calls.length=0;await scheduledCollections(h.env);
+      return h.calls.find(c=>c.method==='editMessageText'&&c.message_id===777777).text;
+    };
+    let text=await render();
+    assert.match(text,/4 із 6 приміщень/);assert.doesNotMatch(text,/Майже всі|Усі, хто підтримав/);
+    h.sqlite.prepare('DELETE FROM premise_votes WHERE poll_id=? AND premise_id=?').run(p.id,ids[5]);
+    text=await render();
+    assert.match(text,/4 із 5 приміщень/);assert.doesNotMatch(text,/Майже всі/,'Exactly twenty percent is not below the threshold');
+    h.sqlite.prepare('INSERT INTO premise_votes(poll_id,premise_id,user_id,option_index) VALUES (?,?,0,0)').run(p.id,ids[5]);
+    h.sqlite.prepare('INSERT INTO collection_totals(collection_id,premise_id,amount) VALUES (1,?,100000)').run(ids[4]);
+    text=await render();
+    assert.match(text,/5 із 6 приміщень/);assert.match(text,/🏁 <b>Майже всі вже долучилися!<\/b>/);
+    assert.match(text,/ще від <b>1 приміщення<\/b>: Кава &lt;ранок&gt; &amp; вечір\./);
+    assert.doesNotMatch(text,/Комерція:|Квартири:|<ранок>/);
+    assert.ok(text.indexOf('Зробили внесок')<text.indexOf('Майже всі'));
+    assert.ok(text.indexOf('Майже всі')<text.indexOf('Запрошуємо всіх охочих!'));
+    h.sqlite.prepare('UPDATE collection_totals SET amount=amount+100000 WHERE collection_id=1 AND premise_id=?').run(ids[4]);
+    text=await render();assert.match(text,/5 із 6 приміщень/);assert.match(text,/ще від <b>1 приміщення/);
+    h.sqlite.prepare('INSERT INTO collection_totals(collection_id,premise_id,amount) VALUES (1,?,200000)').run(ids[5]);
+    text=await render();
+    assert.match(text,/6 із 6 приміщень/);assert.match(text,/Усі, хто підтримав збір, уже долучилися!/);
+    assert.doesNotMatch(text,/Чекаємо на внески|Майже всі|Ціль.*досягнуто/);
+    const {publicCollectionText}=await import('../src/collections.ts');
+    const card=()=>h.sqlite.prepare('SELECT * FROM house_collections WHERE id=1').get();
+    h.sqlite.exec('UPDATE house_collections SET closed=1 WHERE id=1');
+    assert.doesNotMatch(await publicCollectionText(h.env,card()),/Усі, хто підтримав|Майже всі|Чекаємо на внески/);
+    h.sqlite.exec('DELETE FROM premise_votes; UPDATE house_collections SET closed=0 WHERE id=1');
+    assert.doesNotMatch(await publicCollectionText(h.env,card()),/Усі, хто підтримав|Майже всі/);
+    const unlinked=h.sqlite.prepare('SELECT * FROM house_collections WHERE id=3').get();
+    assert.doesNotMatch(await publicCollectionText(h.env,unlinked),/Усі, хто підтримав|Майже всі|Зробили внесок/);
+  }finally{h.close();}
+});

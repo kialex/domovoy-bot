@@ -463,20 +463,37 @@ export async function publicCollectionText(env: Env, collection: Collection) {
   const figures:string[]=[`Зібрано — <b>${money(total)}</b>`];
   if(goal>0)figures.push(`🎯 Ціль банки — <b>${money(goal)}</b>`);
   if(collection.requested_amount!==null)figures.push(`💰 Мінімальний внесок — <b>${money(collection.requested_amount)}</b>`);
+  let participationNote='';
   if(collection.vote_poll_id!==null&&collection.vote_option_index!==null){
-    const stats=await env.HOME_DB.prepare(`SELECT COUNT(*) AS supported,
-      COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM collection_totals t
-        WHERE t.collection_id=c.id AND t.premise_id=p.id AND t.amount>0) THEN 1 ELSE 0 END),0) AS paid
+    const stats=await env.HOME_DB.prepare(`WITH participation AS (
+      SELECT p.kind,p.number,p.number_start,p.business_name,
+        CASE WHEN p.kind='apartment' THEN p.number ELSE p.business_name END AS label,
+        EXISTS (SELECT 1 FROM collection_totals t WHERE t.collection_id=c.id AND t.premise_id=p.id AND t.amount>0) AS paid
       FROM house_collections c JOIN polls poll ON poll.id=c.vote_poll_id AND poll.chat_id=c.chat_id
       JOIN premise_votes v ON v.poll_id=poll.id AND v.option_index=c.vote_option_index
       JOIN premises p ON p.id=v.premise_id AND p.chat_id=c.chat_id
-      WHERE c.id=?`).bind(collection.id).first<{supported:number;paid:number}>();
+      WHERE c.id=?
+    ) SELECT COUNT(*) AS supported,COALESCE(SUM(paid),0) AS paid,
+      json_group_array(label) FILTER (WHERE paid=0) AS missing
+      FROM (SELECT * FROM participation ORDER BY kind,number_start,number,business_name)`)
+      .bind(collection.id).first<{supported:number;paid:number;missing:string}>();
     const supported=stats?.supported??0;
     const singular=supported%10===1&&supported%100!==11;
     figures.push(`👥 Зробили внесок — <b>${stats?.paid??0} із ${supported} ${singular?'приміщення':'приміщень'}</b>, ${singular?'яке підтримало':'які підтримали'} збір`);
+    if(!collection.closed&&supported>0){
+      const missing=JSON.parse(stats?.missing||'[]') as string[];
+      if(!missing.length){
+        participationNote='🙌 <b>Усі, хто підтримав збір, уже долучилися!</b>\nДякуємо кожному за внесок у спільне резервне живлення!';
+      }else if(missing.length*5<supported){
+        const count=missing.length;
+        const word=count%10===1&&count%100!==11?'приміщення':'приміщень';
+        participationNote=`🏁 <b>Майже всі вже долучилися!</b>\nЧекаємо на внески ще від <b>${count} ${word}</b>: ${missing.map(escapeHtml).join(', ')}.\n\nЩе трохи — і всі, хто підтримав збір, будуть із нами 💪 Якщо відкладали на потім — саме час долучитися!`;
+      }
+    }
   }
   const blocks=[`<b>${escapeHtml(collection.title)}</b>\n${collection.closed?'🏁 Збір завершено':'🟢 Збір відкрито'}`];
   blocks.push(figures.join('\n'));
+  if(participationNote)blocks.push(participationNote);
   if(collection.description)blocks.push(escapeHtml(collection.description));
   if(!collection.closed&&collection.mono_fund_id) {
     if(url)blocks.push(`🔗 Посилання на банку\n<a href="${url}">${url}</a>`);
